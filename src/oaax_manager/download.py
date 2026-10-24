@@ -156,7 +156,8 @@ WINDOWS_RESERVED = {"con", "prn", "aux", "nul", *(f"com{i}" for i in range(1, 10
 
 def _fold(name: str) -> str:
     """The name as a case-insensitive, Unicode-normalising, dot/space-trimming filesystem would see it."""
-    return "/".join(unicodedata.normalize("NFC", p).casefold().rstrip(". ") for p in name.split("/"))
+    parts = PurePosixPath(name).parts  # also collapses "./a" and "a//b"
+    return "/".join(unicodedata.normalize("NFC", p).casefold().rstrip(". ") for p in parts)
 
 
 def _check_member(member: tarfile.TarInfo, root: Path, links: set[str], seen: set[str]) -> None:
@@ -233,11 +234,11 @@ def safe_extract(archive: Path, dest: Path, sha256: str | None = None) -> list[s
         _normalise_modes(root, members)
         (root / MARKER).write_text(json.dumps({"archive_sha256": sha256}))  # proves "fully extracted from a verified archive"
         tmp.replace(dest)
-    except (tarfile.TarError, OSError, FetchError) as exc:
+    except Exception as exc:  # tarfile/zlib raise EOFError, KeyError, zlib.error, ... on broken archives
         shutil.rmtree(tmp, ignore_errors=True)
         if isinstance(exc, FetchError):
             raise
-        raise FetchError(f"cannot extract {archive.name}: {exc}") from exc
+        raise FetchError(f"cannot extract {archive.name}: {type(exc).__name__}: {exc}") from exc
     return sorted(m.name for m in members if m.isfile())
 
 

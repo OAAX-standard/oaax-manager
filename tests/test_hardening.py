@@ -266,3 +266,34 @@ def test_check_writes_nothing_and_hashing_sends_if_match(tmp_path, monkeypatch):
     with pytest.raises(RuntimeError):
         gen_index.sha256_of("k", 5, "abc", attempts=1)
     assert seen["If-match"] == '"abc"'
+
+
+# F15: broken archives are a clean error and leave nothing behind
+def test_truncated_gzip_is_a_clean_error(tmp_path):
+    make_tar(tmp_path / "full.tgz", {f"f{i}.so": os.urandom(5000) for i in range(20)})
+    data = (tmp_path / "full.tgz").read_bytes()
+    (tmp_path / "cut.tgz").write_bytes(data[: len(data) // 2])
+    with pytest.raises(FetchError, match="cannot extract"):
+        safe_extract(tmp_path / "cut.tgz", tmp_path / "d")
+    assert not (tmp_path / "d").exists() and not (tmp_path / "d.extracting").exists()
+
+
+def test_hardlink_to_a_missing_member_is_a_clean_error(tmp_path):
+    with tarfile.open(tmp_path / "a.tgz", "w:gz") as tar:
+        info = tarfile.TarInfo("h")
+        info.type = tarfile.LNKTYPE
+        info.linkname = "later"
+        tar.addfile(info)
+    with pytest.raises(FetchError, match="cannot extract"):
+        safe_extract(tmp_path / "a.tgz", tmp_path / "d")
+    assert not (tmp_path / "d").exists() and not (tmp_path / "d.extracting").exists()
+
+
+# F16: duplicates are judged on path components, not raw strings
+@pytest.mark.parametrize("names", [["./a", "a"], ["a//b", "a/b"], ["./A", "a"], ["a/./b", "a/b"]])
+def test_duplicates_with_odd_spellings_are_refused(tmp_path, names):
+    with tarfile.open(tmp_path / "a.tgz", "w:gz") as tar:
+        for n in names:
+            tar.addfile(tarfile.TarInfo(n))
+    with pytest.raises(FetchError, match="collides"):
+        safe_extract(tmp_path / "a.tgz", tmp_path / "d")
