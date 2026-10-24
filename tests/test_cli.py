@@ -112,7 +112,7 @@ def test_existing_runtime_dir_is_left_alone(bucket, monkeypatch, tmp_path, capsy
     assert run(bucket[1], *args) == 0
     capsys.readouterr()
     assert run(bucket[1], *args) == 0
-    assert "already exists" in capsys.readouterr().out
+    assert "already fetched and verified" in capsys.readouterr().out
 
 
 def test_resume_continues_partial_download(bucket, tmp_path):

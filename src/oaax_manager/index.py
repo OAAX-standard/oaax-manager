@@ -16,6 +16,7 @@ OS_NAMES = {"linux": "linux", "windows": "windows", "darwin": "macos"}
 
 NAME = re.compile(r"^[a-z0-9][a-z0-9._+-]*$")  # vendor, version, variant, arch: they become part of file names
 SHA256 = re.compile(r"^[0-9a-f]{64}$")
+VERSION = re.compile(r"^\d+(\.\d+)*$")  # releases only: orderable, no pre-release spellings
 KEY_PART = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._+-]*$")
 WINDOWS_RESERVED = {"con", "prn", "aux", "nul", *(f"com{i}" for i in range(1, 10)), *(f"lpt{i}" for i in range(1, 10))}
 KINDS = ("runtime", "toolchain")
@@ -54,8 +55,8 @@ def host_platform() -> tuple[str, str]:
     return OS_NAMES.get(system, system), ARCH_ALIASES.get(machine, machine)
 
 
-def version_key(version: str) -> tuple:
-    return tuple(int(p) if p.isdigit() else p for p in re.split(r"[.\-]", version))
+def version_key(version: str) -> tuple[int, ...]:
+    return tuple(int(p) for p in version.split("."))
 
 
 def validate_entry(a: dict) -> None:
@@ -65,7 +66,7 @@ def validate_entry(a: dict) -> None:
         (a["os"] in OSES, "os"),
         (a["arch"] == "any" or bool(NAME.match(a["arch"])), "arch"),
         (bool(NAME.match(a["vendor"])), "vendor"),
-        (bool(NAME.match(a["version"])), "version"),
+        (bool(VERSION.match(a["version"])), "version"),
         (a.get("variant") is None or bool(NAME.match(a["variant"])), "variant"),
         (type(a["size"]) is int and a["size"] > 0, "size"),
         (isinstance(a["sha256"], str) and bool(SHA256.match(a["sha256"])), "sha256"),

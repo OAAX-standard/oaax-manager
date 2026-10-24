@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 from pathlib import Path
 
 from . import __version__
-from .download import FetchError, check_disk_space, download, safe_extract, sha256_file
+from .download import MARKER, FetchError, check_disk_space, download, fetch_lock, safe_extract, sha256_file
 from .index import Artifact, IndexError_, host_platform, load_index, version_key
 
 
@@ -57,13 +58,6 @@ def resolve(args: argparse.Namespace, index: list[Artifact]) -> Artifact:
     if not candidates:
         known = sorted({a.vendor for a in index if a.kind == args.kind})
         raise UserError(f"no {args.kind} for vendor {args.vendor!r}. Available: {', '.join(known)}")
-    if args.version:
-        candidates = [a for a in candidates if a.version == args.version]
-        if not candidates:
-            raise UserError(f"no {args.kind} {args.vendor} version {args.version}")
-    else:
-        newest = max(version_key(a.version) for a in candidates)
-        candidates = [a for a in candidates if version_key(a.version) == newest]
     if args.kind == "runtime":
         host_os, host_arch = host_platform()
         want_os, want_arch = args.os or host_os, args.arch or host_arch
@@ -73,6 +67,13 @@ def resolve(args: argparse.Namespace, index: list[Artifact]) -> Artifact:
                 f"no {args.vendor} runtime for {want_os}-{want_arch}. "
                 "See `oaax-manager list --kind runtime`, or pass --os/--arch to fetch a build for another machine."
             )
+    if args.version:
+        candidates = [a for a in candidates if a.version == args.version]
+        if not candidates:
+            raise UserError(f"no {args.kind} {args.vendor} version {args.version} for this platform")
+    else:  # default: the newest version that exists for this platform
+        newest = max(version_key(a.version) for a in candidates)
+        candidates = [a for a in candidates if version_key(a.version) == newest]
     if args.variant:
         candidates = [a for a in candidates if a.variant == args.variant]
         if not candidates:
@@ -95,13 +96,16 @@ def fetch_toolchain(a: Artifact, out: Path, force: bool) -> int:
     dest = out / a.filename
     if out.resolve() not in dest.resolve().parents:
         raise FetchError(f"refusing to write outside {out}")
-    if dest.exists() and not force and sha256_file(dest) == a.sha256:
-        print(f"{dest} is already downloaded and verified")
-    else:
-        print(f"Downloading {describe(a)} ({human_size(a.size)})")
-        check_disk_space(out, a.size)
-        download(a.url, dest, a.size, a.sha256)
-        print(f"Verified sha256 and saved {dest}")
+    if dest.is_dir():
+        raise UserError(f"{dest} is a directory")
+    with fetch_lock(dest):
+        if dest.is_file() and not force and sha256_file(dest) == a.sha256:
+            print(f"{dest} is already downloaded and verified")
+        else:
+            print(f"Downloading {describe(a)} ({human_size(a.size)})")
+            check_disk_space(out, a.size)
+            download(a.url, dest, a.size, a.sha256)
+            print(f"Verified sha256 and saved {dest}")
     print(f"Load it into Docker with:  docker load -i {dest}\n(the image name and tag come from the tar; check `docker image ls`)")
     return 0
 
@@ -111,19 +115,33 @@ def fetch_runtime(a: Artifact, out: Path) -> int:
     dest = out / name
     if out.resolve() not in dest.resolve().parents:
         raise FetchError(f"refusing to write outside {out}")
-    if dest.exists():
-        print(f"{dest} already exists; delete it to fetch it again")
-        return 0
-    print(f"Downloading {describe(a)} ({human_size(a.size)})")
-    check_disk_space(out, 3 * a.size)  # archive + extracted files
-    archive = out / f"{name}-{a.filename}"
-    download(a.url, archive, a.size, a.sha256)
-    files = safe_extract(archive, dest)
-    archive.unlink()
+    with fetch_lock(dest):
+        if dest.exists() or dest.is_symlink():
+            return report_existing(dest, a)
+        print(f"Downloading {describe(a)} ({human_size(a.size)})")
+        check_disk_space(out, 3 * a.size)  # archive + extracted files
+        archive = out / f"{name}-{a.filename}"
+        download(a.url, archive, a.size, a.sha256)
+        try:
+            files = safe_extract(archive, dest, a.sha256)
+        finally:
+            archive.unlink(missing_ok=True)  # verified, but useless once extracted or refused
     libs = [f for f in files if Path(f).name in ("libRuntimeLibrary.so", "RuntimeLibrary.dll")]
     print(f"Verified and extracted {len(files)} files to {dest}")
     for lib in libs:
         print(f"Runtime library: {dest / lib}")
+    return 0
+
+
+def report_existing(dest: Path, a: Artifact) -> int:
+    """An existing target counts as done only if this tool completed it for this exact build."""
+    try:
+        done = json.loads((dest / MARKER).read_text()).get("archive_sha256") == a.sha256
+    except (OSError, ValueError, AttributeError):
+        done = False
+    if not done:
+        raise UserError(f"{dest} exists but was not completed by this oaax-manager for this build; delete it and run again")
+    print(f"{dest} is already fetched and verified (sha256 {a.sha256[:12]}...); delete it to fetch again")
     return 0
 
 
@@ -152,10 +170,16 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
+    if sys.version_info < (3, 9):
+        print(f"error: oaax-manager needs Python 3.9 or newer (this is {sys.version.split()[0]})", file=sys.stderr)
+        return 1
     args = build_parser().parse_args(argv)
     try:
         return args.func(args, load_index(args.index))
     except (UserError, FetchError, IndexError_) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    except OSError as exc:  # unwritable or conflicting output path, disk errors
         print(f"error: {exc}", file=sys.stderr)
         return 1
     except KeyboardInterrupt:

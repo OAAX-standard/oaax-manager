@@ -26,6 +26,7 @@ class RangeHandler(http.server.SimpleHTTPRequestHandler):
         start = int(re.match(r"bytes=(\d+)-", header).group(1))
         data = path.read_bytes()[start:]
         self.send_response(206)
+        self.send_header("Content-Range", f"bytes {start}-{start + len(data) - 1}/{start + len(data)}")
         self.send_header("Content-Length", str(len(data)))
         self.end_headers()
         self.wfile.write(data)

@@ -28,7 +28,7 @@ INDEX = Path(__file__).resolve().parent.parent / "src" / "oaax_manager" / "index
 PARTIAL = INDEX.with_name("index.partial.json")  # finished entries of an interrupted run (git-ignored)
 
 RUNTIME_KEY = re.compile(
-    r"^runtimes/(?P<version>[^/]+)/(?P<dir>[A-Z_]+)/(?P<arch>[a-z0-9_]+)(?:-(?P<flavor>[a-z]+))?/(?P<os>Ubuntu|Windows)"
+    r"^runtimes/(?P<version>[^/]+)/(?P<dir>[A-Z_]+)/(?P<arch>x86_64|aarch64)(?:-(?P<flavor>[a-z]+))?/(?P<os>Ubuntu|Windows)"
     r"(?:/(?P<ubuntu>\d+\.\d+))?/(?P<file>library[^/]*\.tar\.gz)$"
 )
 TOOLCHAIN_KEY = re.compile(r"^conversion-toolchain/(?P<version>[^/]+)/[A-Z_]+/oaax-(?P<name>[a-z0-9-]+)-toolchain\.tar$")
@@ -57,13 +57,19 @@ def classify(key: str, size: int) -> dict | None:
     return None
 
 
+LISTING_LINE = re.compile(r"^\S+\s+\S+\s+(?P<size>\d+)\s+s3://[^/]+/(?P<key>.+)$")
+
+
 def parse_listing(text: str) -> list[tuple[str, int]]:
-    """Parse `s3cmd ls --recursive` output into (key, size)."""
+    """Parse `s3cmd ls --recursive` output into (key, size); a line that mentions s3:// but does not parse is an error."""
     rows = []
     for line in text.splitlines():
-        fields = line.split()
-        if len(fields) == 4 and fields[3].startswith("s3://"):
-            rows.append((fields[3].split("/", 3)[3], int(fields[2])))
+        if "s3://" not in line:
+            continue
+        match = LISTING_LINE.match(line.strip())
+        if not match:
+            raise SystemExit(f"cannot parse listing line (use plain `s3cmd ls --recursive`, no -H): {line!r}")
+        rows.append((match["key"], int(match["size"])))
     return rows
 
 
@@ -93,11 +99,13 @@ def head(key: str) -> tuple[int, str]:
         return int(r.headers["Content-Length"]), r.headers["ETag"].strip('"')
 
 
-def sha256_of(key: str, size: int, attempts: int = 6) -> str:
+def sha256_of(key: str, size: int, etag: str, attempts: int = 6) -> str:
     """Stream the object into a hash; after a dropped connection continue with a Range request."""
     digest, seen = hashlib.sha256(), 0
     for attempt in range(attempts):
-        headers = {"Range": f"bytes={seen}-"} if seen else {}
+        headers = {"If-Match": f'"{etag}"'}  # fail instead of hashing a mix of two uploads
+        if seen:
+            headers["Range"] = f"bytes={seen}-"
         try:
             with urllib.request.urlopen(urllib.request.Request(f"{BASE_URL}/{key}", headers=headers), timeout=60) as r:
                 if seen and r.status != 206:
@@ -118,7 +126,7 @@ def build_entry(item: dict, old: dict[str, dict]) -> dict:
     if known and known["size"] == size and known["etag"] == etag:
         return {**item, "size": size, "etag": etag, "sha256": known["sha256"]}
     print(f"hashing {item['key']} ({size / 1e6:.0f} MB)", file=sys.stderr)
-    return {**item, "size": size, "etag": etag, "sha256": sha256_of(item["key"], size)}
+    return {**item, "size": size, "etag": etag, "sha256": sha256_of(item["key"], size, etag)}
 
 
 def main() -> int:
@@ -144,7 +152,8 @@ def main() -> int:
         entry = build_entry(item, old)
         with lock:  # keep finished hashes if a later artifact fails
             done[entry["key"]] = entry
-            PARTIAL.write_text(json.dumps({"artifacts": list(done.values())}))
+            if not args.check:
+                PARTIAL.write_text(json.dumps({"artifacts": list(done.values())}))
         return entry
 
     with ThreadPoolExecutor(max_workers=4) as pool:

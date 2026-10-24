@@ -2,11 +2,16 @@
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
+import json
+import os
+import re
 import shutil
 import sys
-import time
 import tarfile
+import time
+import unicodedata
 import urllib.error
 import urllib.request
 from pathlib import Path, PurePosixPath, PureWindowsPath
@@ -26,30 +31,70 @@ def sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
+_last_decile = -1
+
+
 def _progress(done: int, total: int) -> None:
+    """Live percentage on a terminal; one line per 10 % when output is piped or logged."""
+    global _last_decile
+    percent = 100 * done // max(total, 1)
     if sys.stderr.isatty():
-        print(f"\r  {done / 1e6:8.1f} / {total / 1e6:.1f} MB ({100 * done // max(total, 1)}%)", end="", file=sys.stderr)
+        print(f"\r  {done / 1e6:8.1f} / {total / 1e6:.1f} MB ({percent}%)", end="", file=sys.stderr)
+    elif percent // 10 != _last_decile:
+        _last_decile = percent // 10
+        print(f"  {done / 1e6:.0f} / {total / 1e6:.0f} MB ({percent}%)", file=sys.stderr, flush=True)
+
+
+@contextlib.contextmanager
+def fetch_lock(target: Path):
+    """Refuse to run twice for the same target: an advisory lock on `<target>.lock` (flock / msvcrt, no stale locks)."""
+    target.parent.mkdir(parents=True, exist_ok=True)
+    path = target.with_name(target.name + ".lock")
+    handle = open(path, "a+b")
+    try:
+        try:
+            if sys.platform == "win32":
+                import msvcrt
+                msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+            else:
+                import fcntl
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            raise FetchError(f"another oaax-manager is already fetching {target.name} (lock: {path})") from None
+        yield
+    finally:
+        handle.close()  # releases the lock
+        with contextlib.suppress(OSError):
+            path.unlink()
 
 
 def download(url: str, dest: Path, size: int, sha256: str) -> None:
-    """Download `url` to `dest` (resuming `dest.part`), then verify size and sha256."""
+    """Download `url` to `dest` (resuming `dest.part`), then verify size and sha256.
+
+    A resumed .part can mix bytes of two uploads (vendors re-upload 2.0.0): if it fails verification it is
+    discarded and the file is fetched once more from byte 0 before the failure is blamed on upstream.
+    """
     part = dest.with_name(dest.name + ".part")
     part.parent.mkdir(parents=True, exist_ok=True)
-    have = part.stat().st_size if part.exists() else 0
-    if have > size:
-        part.unlink(missing_ok=True)
-        have = 0
-    if have < size:
-        _transfer_with_retries(url, part, size)
-    actual = sha256_file(part)
-    if actual != sha256:
+    for attempt in (1, 2):
+        have = part.stat().st_size if part.exists() else 0
+        resumed = 0 < have <= size
+        if have > size:
+            part.unlink()
+        if not part.exists() or part.stat().st_size < size:
+            _transfer_with_retries(url, part, size)
+        actual = sha256_file(part)
+        if actual == sha256:
+            part.replace(dest)
+            return
         part.unlink()
-        raise FetchError(
-            f"sha256 mismatch for {url}\n  expected {sha256}\n  got      {actual}\n"
-            "The artifact changed upstream after this oaax-manager release (2.0.0 files are still re-uploaded on "
-            "every vendor build): upgrade oaax-manager, or report it if it is already the latest."
-        )
-    part.replace(dest)
+        if not resumed:
+            break
+    raise FetchError(
+        f"sha256 mismatch for {url}\n  expected {sha256}\n  got      {actual}\n"
+        "The artifact changed upstream after this oaax-manager release (2.0.0 files are still re-uploaded on "
+        "every vendor build): upgrade oaax-manager, or report it if it is already the latest."
+    )
 
 
 def _transfer_with_retries(url: str, part: Path, size: int, attempts: int = 3) -> None:
@@ -65,17 +110,25 @@ def _transfer_with_retries(url: str, part: Path, size: int, attempts: int = 3) -
             time.sleep(2 ** attempt)
 
 
+def _resumes_at(response, have: int) -> bool:
+    match = re.match(r"bytes (\d+)-", response.headers.get("Content-Range", ""))
+    return response.status == 206 and bool(match) and int(match[1]) == have
+
+
 class ServerError(FetchError):
     """The server misbehaves (more data than the index says): not retried."""
 
 
 def _transfer(url: str, part: Path, have: int, size: int) -> None:
     """Append to `part` until it holds exactly `size` bytes; never write more than the index promises."""
+    global _last_decile
+    _last_decile = -1
     request = urllib.request.Request(url, headers={"Range": f"bytes={have}-"} if have else {})
     try:
         with urllib.request.urlopen(request, timeout=60) as response:
-            if have and response.status != 206:  # server ignored the Range header: start over
-                have = 0
+            if have and not _resumes_at(response, have):  # Range ignored or answered for another offset: start over
+                response.close()
+                return _transfer(url, part, 0, size)
             announced = response.headers.get("Content-Length")
             if announced is not None and announced.isdigit() and int(announced) > size - have:
                 part.unlink(missing_ok=True)
@@ -100,7 +153,15 @@ def _transfer(url: str, part: Path, have: int, size: int) -> None:
         raise FetchError(f"incomplete download of {url}: got {have} of {size} bytes (run the same command again to resume)")
 
 
-def _check_member(member: tarfile.TarInfo, root: Path, links: set[str]) -> None:
+WINDOWS_RESERVED = {"con", "prn", "aux", "nul", *(f"com{i}" for i in range(1, 10)), *(f"lpt{i}" for i in range(1, 10))}
+
+
+def _fold(name: str) -> str:
+    """The name as a case-insensitive, Unicode-normalising, dot/space-trimming filesystem would see it."""
+    return "/".join(unicodedata.normalize("NFC", p).casefold().rstrip(". ") for p in name.split("/"))
+
+
+def _check_member(member: tarfile.TarInfo, root: Path, links: set[str], seen: set[str]) -> None:
     """Strict rules, identical on every Python version (no reliance on tarfile's own filters).
 
     Links may only point *down* (relative, no `..`) and nothing may be written through a link of the archive,
@@ -114,8 +175,16 @@ def _check_member(member: tarfile.TarInfo, root: Path, links: set[str]) -> None:
     parts = PurePosixPath(name).parts
     if ".." in parts or not (root / name).resolve().is_relative_to(root):
         raise FetchError(f"unsafe archive: {name!r} escapes the target directory")
+    if PurePosixPath(name).parts == (MARKER,):
+        raise FetchError(f"unsafe archive: {name!r} is reserved for oaax-manager")
     if member.isdev() or member.isfifo():
         raise FetchError(f"unsafe archive: special file {name!r}")
+    if any(p != p.rstrip(". ") or p.split(".")[0].casefold() in WINDOWS_RESERVED for p in parts):
+        raise FetchError(f"unsafe archive: {name!r} is not a valid file name on Windows")
+    folded = _fold(name.rstrip("/"))
+    if folded in seen:
+        raise FetchError(f"unsafe archive: {name!r} collides with another member (duplicate or case/Unicode variant)")
+    seen.add(folded)
     if any("/".join(parts[:i]) in links for i in range(1, len(parts) + 1)):
         raise FetchError(f"unsafe archive: {name!r} is written through a link of the archive")
     if member.issym() or member.islnk():
@@ -125,7 +194,20 @@ def _check_member(member: tarfile.TarInfo, root: Path, links: set[str]) -> None:
         links.add("/".join(parts))
 
 
-def safe_extract(archive: Path, dest: Path) -> list[str]:
+MARKER = ".oaax-manager.json"
+
+
+def _normalise_modes(root: Path, members: list[tarfile.TarInfo]) -> None:
+    """Same permissions on every Python and OS: 0755 for executables and directories, 0644 for the rest."""
+    for member in members:
+        if member.issym() or member.islnk():
+            continue
+        path = root / member.name
+        executable = member.isdir() or bool(member.mode & 0o100)
+        path.chmod(0o755 if executable else 0o644)
+
+
+def safe_extract(archive: Path, dest: Path, sha256: str | None = None) -> list[str]:
     """Extract `archive` into a fresh `dest`, all or nothing.
 
     Every member is checked before anything is written; files go to a temporary sibling directory that is
@@ -142,14 +224,16 @@ def safe_extract(archive: Path, dest: Path) -> list[str]:
         with tarfile.open(archive) as tar:
             members = tar.getmembers()
             links: set[str] = set()
+            seen: set[str] = set()
             for member in members:
-                _check_member(member, root, links)
+                _check_member(member, root, links, seen)
             for member in members:
                 if hasattr(tarfile, "data_filter"):
                     tar.extract(member, root, filter="data")
                 else:
-                    member.mode &= 0o777
                     tar.extract(member, root)
+        _normalise_modes(root, members)
+        (root / MARKER).write_text(json.dumps({"archive_sha256": sha256}))  # proves "fully extracted from a verified archive"
         tmp.replace(dest)
     except (tarfile.TarError, OSError, FetchError) as exc:
         shutil.rmtree(tmp, ignore_errors=True)
