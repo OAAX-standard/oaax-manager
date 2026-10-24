@@ -4,10 +4,10 @@
 The public bucket does not allow listing, so this needs `s3cmd` configured with read access (maintainers only);
 the listing can also be given as files. Hashes of unchanged objects (same size and ETag) are reused.
 
-    python tools/gen_index.py                              # list s3://oaax/*/2.0.0 and update the index
-    python tools/gen_index.py --version 2.1.0              # add another version (kept next to the others)
-    python tools/gen_index.py --listing a.txt --listing b.txt   # use saved `s3cmd ls --recursive` output
-    python tools/gen_index.py --check                      # exit 1 if the index is out of date (new, gone or changed)
+    uv run tools/gen_index.py                              # list s3://oaax/*/2.0.0 and update the index
+    uv run tools/gen_index.py --version 2.1.0              # add another version (kept next to the others)
+    uv run tools/gen_index.py --listing a.txt --listing b.txt   # use saved `s3cmd ls --recursive` output
+    uv run tools/gen_index.py --check                      # exit 1 if the index is out of date (new, gone or changed)
 """
 
 from __future__ import annotations

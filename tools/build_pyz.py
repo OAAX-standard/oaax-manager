@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Build a single-file oaax-manager.pyz from the package sources only (no caches, no egg-info).
 
-    python tools/build_pyz.py [output]      # default: ./oaax-manager.pyz;  run it: python oaax-manager.pyz list
-    SOURCE_DATE_EPOCH=<unix time> python tools/build_pyz.py   # reproducible output
+    uv run --no-project python tools/build_pyz.py [output]      # default: ./oaax-manager.pyz;  run it: python oaax-manager.pyz list
+    SOURCE_DATE_EPOCH=<unix time> uv run --no-project python tools/build_pyz.py   # reproducible output
 """
 
 from __future__ import annotations

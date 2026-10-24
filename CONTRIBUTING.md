@@ -11,5 +11,7 @@ Please read the [general OAAX contributing guide](https://github.com/OAAX-standa
 ## Development environment
 
 ```bash
-pip install -e ".[test]" && pytest
+uv sync && uv run pytest
 ```
+
+The project uses [uv](https://docs.astral.sh/uv/); commit `uv.lock` together with any change to `pyproject.toml` dependencies.

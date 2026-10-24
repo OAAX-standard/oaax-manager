@@ -7,12 +7,13 @@ Pure Python (standard library only), works on Linux, Windows and macOS.
 
 ## Install
 
-Python 3.9+, no dependencies.
+Needs [uv](https://docs.astral.sh/uv/) (it also provides Python 3.9+ if you have none). No dependencies.
 
 ```bash
-pipx install git+https://github.com/OAAX-standard/oaax-manager   # isolated, puts `oaax-manager` on PATH (needs repo access while private)
-pip install .                                                     # or from a clone
-python tools/build_pyz.py                                         # or one self-contained file: python oaax-manager.pyz list
+uv tool install git+https://github.com/OAAX-standard/oaax-manager    # puts `oaax-manager` on PATH, isolated (needs repo access while private)
+uvx --from git+https://github.com/OAAX-standard/oaax-manager oaax-manager list   # or run it once without installing
+uv tool install .                                                    # or from a clone
+uv run --no-project python tools/build_pyz.py                        # or one self-contained file: python oaax-manager.pyz list
 ```
 
 ## Use
@@ -43,7 +44,7 @@ macOS: no OAAX runtime is published for macOS yet, so `fetch runtime` says so; t
 ## How the index works
 
 The artifact bucket does not allow public listing, so the package ships `src/oaax_manager/index.json` (kind, vendor, platform, size, sha256, URL).
-Maintainers regenerate it with `python tools/gen_index.py` (needs `s3cmd` with read access): it lists the bucket, derives vendor, platform and
+Maintainers regenerate it with `uv run tools/gen_index.py` (needs `s3cmd` with read access): it lists the bucket, derives vendor, platform and
 variant from the key layout (no hand-written catalogue), and hashes whatever is new or changed. `--check` exits 1 if the index no longer matches the bucket.
 Variant names (`cuda12`, `jetson-cuda12`, `ubuntu22.04-trt11-cuda13`, `hailort4.20.0`, ...) are derived from the key and kept stable.
 The NVIDIA TensorRT conversion `.whl` in the bucket is not indexed (it is a Python package, not a Docker toolchain).
@@ -58,8 +59,10 @@ artifacts (with `SHA256SUMS`). Pushing a tag `vX.Y.Z` (must equal `__version__`)
 ## Development
 
 ```bash
-pip install -e '.[test]' && pytest
-python tools/gen_index.py          # refresh hashes (downloads whatever changed)
+uv sync                          # dev environment from uv.lock
+uv run pytest                    # tests
+uv run --python 3.9 pytest       # the oldest supported Python
+uv run tools/gen_index.py        # refresh the index (needs s3cmd with read access; downloads whatever changed)
 ```
 
 ## Contributing
