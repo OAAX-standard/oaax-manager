@@ -5,3 +5,5 @@ dist/
 build/
 *.pyz
 src/oaax_manager/index.partial.json
+.claude/
+.pytest_cache/
