@@ -159,5 +159,10 @@ def main(argv: list[str] | None = None) -> int:
         return 130
 
 
-if __name__ == "__main__":
+def run() -> None:
+    """Entry point for the zipapp (`-m oaax_manager.cli:run`): zipapp drops main()'s return value."""
     sys.exit(main())
+
+
+if __name__ == "__main__":
+    run()

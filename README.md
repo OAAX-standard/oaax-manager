@@ -12,7 +12,7 @@ Python 3.9+, no dependencies.
 ```bash
 pipx install git+https://github.com/OAAX-standard/oaax-manager   # isolated, puts `oaax-manager` on PATH (needs repo access while private)
 pip install .                                                     # or from a clone
-python -m zipapp src -m oaax_manager.cli:main -o oaax-manager.pyz # or one self-contained file: python oaax-manager.pyz list
+python tools/build_pyz.py                                         # or one self-contained file: python oaax-manager.pyz list
 ```
 
 ## Use

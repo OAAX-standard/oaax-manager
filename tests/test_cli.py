@@ -183,12 +183,17 @@ def test_transient_failure_is_retried_and_resumed(bucket, monkeypatch, tmp_path)
     assert len(calls) == 2
 
 
-def test_zipapp_runs_with_its_packaged_index(tmp_path):
+def test_zipapp_runs_with_its_packaged_index_and_keeps_exit_codes(tmp_path):
     import subprocess
-    import zipapp
+    import sys as _sys
     from pathlib import Path
-    pyz = tmp_path / "oaax-manager.pyz"
-    zipapp.create_archive(Path(cli.__file__).parent.parent, pyz, main="oaax_manager.cli:main")
-    result = subprocess.run([sys.executable, str(pyz), "list"], capture_output=True, text=True, cwd=tmp_path)
-    assert result.returncode == 0, result.stderr
-    assert "runtime" in result.stdout
+    _sys.path.insert(0, str(Path(cli.__file__).parents[2] / "tools"))
+    import build_pyz
+    pyz = build_pyz.build(tmp_path / "oaax-manager.pyz")
+    import zipfile
+    names = zipfile.ZipFile(pyz).namelist()
+    assert "oaax_manager/index.json" in names and not [n for n in names if "__pycache__" in n or "egg-info" in n]
+    ok = subprocess.run([sys.executable, str(pyz), "list"], capture_output=True, text=True, cwd=tmp_path)
+    assert ok.returncode == 0 and "runtime" in ok.stdout, ok.stderr
+    bad = subprocess.run([sys.executable, str(pyz), "fetch", "runtime", "nosuch"], capture_output=True, text=True, cwd=tmp_path)
+    assert bad.returncode == 1 and "error:" in bad.stderr
