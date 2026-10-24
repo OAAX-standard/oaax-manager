@@ -74,3 +74,10 @@ def make_index(server, tmp_path):
         return path
 
     return write
+
+
+def pytest_collection_modifyitems(items):
+    """pytest stores the test id in an environment variable; Windows allows 32767 characters. Fail early on Linux too."""
+    too_long = [item.nodeid[:80] for item in items if len(item.nodeid) > 1000]
+    if too_long:
+        raise pytest.UsageError(f"test ids too long for Windows environment variables (give parametrize ids=): {too_long}")

@@ -106,7 +106,8 @@ def test_failed_extraction_removes_the_verified_archive(server, make_index, tmp_
 
 
 # F8: a stale or foreign .part is replaced, not blamed on upstream
-@pytest.mark.parametrize("stale", [b"\x00" * 12000, b"y" * 5000])
+# ids matter: pytest puts the test id in an environment variable (32767 chars max on Windows)
+@pytest.mark.parametrize("stale", [b"\x00" * 12000, b"y" * 5000], ids=["same-size-wrong-bytes", "shorter-foreign-part"])
 def test_stale_part_is_retried_from_zero(bucket, tmp_path, stale):
     out = tmp_path / "o"
     out.mkdir()
