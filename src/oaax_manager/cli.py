@@ -93,6 +93,8 @@ def cmd_fetch(args: argparse.Namespace, index: list[Artifact]) -> int:
 
 def fetch_toolchain(a: Artifact, out: Path, force: bool) -> int:
     dest = out / a.filename
+    if out.resolve() not in dest.resolve().parents:
+        raise FetchError(f"refusing to write outside {out}")
     if dest.exists() and not force and sha256_file(dest) == a.sha256:
         print(f"{dest} is already downloaded and verified")
     else:
@@ -107,6 +109,8 @@ def fetch_toolchain(a: Artifact, out: Path, force: bool) -> int:
 def fetch_runtime(a: Artifact, out: Path) -> int:
     name = "-".join(["runtime", a.vendor, a.version, a.os, a.arch] + ([a.variant] if a.variant else []))
     dest = out / name
+    if out.resolve() not in dest.resolve().parents:
+        raise FetchError(f"refusing to write outside {out}")
     if dest.exists():
         print(f"{dest} already exists; delete it to fetch it again")
         return 0

@@ -14,6 +14,14 @@ ARCH_ALIASES = {"amd64": "x86_64", "x86_64": "x86_64", "aarch64": "aarch64", "ar
 OS_NAMES = {"linux": "linux", "windows": "windows", "darwin": "macos"}
 
 
+NAME = re.compile(r"^[a-z0-9][a-z0-9._+-]*$")  # vendor, version, variant, arch: they become part of file names
+SHA256 = re.compile(r"^[0-9a-f]{64}$")
+KEY_PART = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._+-]*$")
+WINDOWS_RESERVED = {"con", "prn", "aux", "nul", *(f"com{i}" for i in range(1, 10)), *(f"lpt{i}" for i in range(1, 10))}
+KINDS = ("runtime", "toolchain")
+OSES = ("linux", "windows", "macos", "any")
+
+
 class IndexError_(Exception):
     """The index file is unreadable or malformed."""
 
@@ -50,6 +58,25 @@ def version_key(version: str) -> tuple:
     return tuple(int(p) if p.isdigit() else p for p in re.split(r"[.\-]", version))
 
 
+def validate_entry(a: dict) -> None:
+    """Reject anything that could escape the output directory or make a verification meaningless."""
+    checks = [
+        (a["kind"] in KINDS, "kind"),
+        (a["os"] in OSES, "os"),
+        (a["arch"] == "any" or bool(NAME.match(a["arch"])), "arch"),
+        (bool(NAME.match(a["vendor"])), "vendor"),
+        (bool(NAME.match(a["version"])), "version"),
+        (a.get("variant") is None or bool(NAME.match(a["variant"])), "variant"),
+        (type(a["size"]) is int and a["size"] > 0, "size"),
+        (isinstance(a["sha256"], str) and bool(SHA256.match(a["sha256"])), "sha256"),
+        (isinstance(a["key"], str) and all(KEY_PART.match(p) for p in a["key"].split("/")), "key"),
+        (a["key"].rsplit("/", 1)[-1].split(".")[0].lower() not in WINDOWS_RESERVED, "key"),
+    ]
+    for ok, field in checks:
+        if not ok:
+            raise ValueError(f"invalid {field} in entry {a.get('key')!r}")
+
+
 def load_index(path: Path | None = None) -> list[Artifact]:
     """Load the packaged index, or the file at `path` (used for tests and mirrors)."""
     try:
@@ -59,6 +86,8 @@ def load_index(path: Path | None = None) -> list[Artifact]:
         parsed = urlparse(base)
         if parsed.scheme != "https" and not (parsed.scheme == "http" and parsed.hostname in ("127.0.0.1", "localhost")):
             raise ValueError(f"base_url must be https (http only for localhost): {base}")
+        for a in data["artifacts"]:
+            validate_entry(a)
         return [
             Artifact(
                 kind=a["kind"], vendor=a["vendor"], version=a["version"], os=a["os"], arch=a["arch"],
@@ -67,5 +96,5 @@ def load_index(path: Path | None = None) -> list[Artifact]:
             )
             for a in data["artifacts"]
         ]
-    except (OSError, ValueError, KeyError, TypeError) as exc:
+    except (OSError, ValueError, KeyError, TypeError, AttributeError) as exc:
         raise IndexError_(f"cannot read the artifact index: {exc}") from exc

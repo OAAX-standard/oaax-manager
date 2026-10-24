@@ -197,3 +197,107 @@ def test_zipapp_runs_with_its_packaged_index_and_keeps_exit_codes(tmp_path):
     assert ok.returncode == 0 and "runtime" in ok.stdout, ok.stderr
     bad = subprocess.run([sys.executable, str(pyz), "fetch", "runtime", "nosuch"], capture_output=True, text=True, cwd=tmp_path)
     assert bad.returncode == 1 and "error:" in bad.stderr
+
+
+# ---- bounded downloads (adversary F2) ----
+
+def raw_server(handler_body):
+    """A server that answers every GET with `handler_body(wfile)` and no Content-Length."""
+    import http.server
+    import threading
+
+    class H(http.server.BaseHTTPRequestHandler):
+        def log_message(self, *a):
+            pass
+
+        def do_GET(self):
+            self.send_response(200)
+            self.end_headers()
+            try:
+                handler_body(self.wfile)
+            except OSError:
+                pass
+
+    httpd = http.server.ThreadingHTTPServer(("127.0.0.1", 0), H)
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    return httpd
+
+
+def index_for(tmp_path, url, size, sha="0" * 64, **fields):
+    entry_ = dict(kind="toolchain", vendor="cpu", version="2.0.0", os="any", arch="any", variant=None,
+                  key="tc/tool.tar", size=size, sha256=sha, etag="x", **fields)
+    path = tmp_path / "evil.json"
+    path.write_text(json.dumps({"schema": 1, "base_url": url, "artifacts": [entry_]}))
+    return path
+
+
+def test_endless_body_is_cut_at_the_indexed_size(tmp_path, monkeypatch, capsys):
+    from oaax_manager import download
+    monkeypatch.setattr(download.time, "sleep", lambda s: None)
+    sent = []
+
+    def endless(w):
+        for _ in range(2000):  # 2000 x 64 KB = 128 MB, far more than the indexed 115 bytes
+            w.write(b"\0" * 65536)
+            sent.append(1)
+
+    httpd = raw_server(endless)
+    try:
+        out = tmp_path / "o"
+        code = run(index_for(tmp_path, f"http://127.0.0.1:{httpd.server_address[1]}", 115), "fetch", "toolchain", "cpu", "-o", str(out))
+    finally:
+        httpd.shutdown()
+    assert code == 1 and "more data than the indexed size" in capsys.readouterr().err
+    assert not list(out.glob("*")), "no .part or file may stay"
+    assert len(sent) < 100  # and it was not retried or drained to the end
+
+
+def test_announced_length_above_index_is_refused_before_writing(bucket, tmp_path, capsys):
+    root, index_path = bucket
+    cfg = json.loads(index_path.read_text())
+    for a in cfg["artifacts"]:
+        if a["key"] == "tc/tool.tar":
+            a["size"] = 100  # the file served is 12000 bytes
+    index_path.write_text(json.dumps(cfg))
+    out = tmp_path / "o"
+    assert run(index_path, "fetch", "toolchain", "cpu", "-o", str(out)) == 1
+    assert "announces" in capsys.readouterr().err
+    assert not list(out.glob("*"))
+
+
+# ---- hostile index (adversary F3) ----
+
+GOOD = dict(kind="runtime", vendor="cpu", version="2.0.0", os="linux", arch="x86_64", variant=None,
+            key="rt/library.tar.gz", size=10, sha256="a" * 64, etag="x")
+
+
+@pytest.mark.parametrize("field, value", [
+    ("size", 0), ("size", -1), ("size", "12"), ("size", 1.5), ("size", True),
+    ("sha256", "A" * 64), ("sha256", "abc"), ("sha256", None),
+    ("vendor", "x/../../../../PWNED"), ("vendor", "a\\b"), ("vendor", "Cpu"), ("vendor", ""),
+    ("variant", "CON/x"), ("variant", ".."), ("version", "../2"), ("arch", "x/y"), ("os", "solaris"), ("kind", "wheel"),
+    ("key", "/abs/library.tar.gz"), ("key", "a/../b.tar"), ("key", "rt/"), ("key", ""), ("key", "rt\\x.tar"),
+    ("key", "http://evil/x.tar"), ("key", "rt/con.tar"), ("key", "rt/NUL.tar.gz"),
+])
+def test_bad_index_entries_are_a_clean_error(tmp_path, capsys, field, value):
+    path = tmp_path / "i.json"
+    path.write_text(json.dumps({"schema": 1, "base_url": "https://example.com/b", "artifacts": [{**GOOD, field: value}]}))
+    assert run(path, "list") == 1
+    err = capsys.readouterr().err
+    assert err.startswith("error: cannot read the artifact index") and "Traceback" not in err
+
+
+@pytest.mark.parametrize("bad", ["not json", "[]", '{"artifacts": 3}', '{"base_url": "https://x", "artifacts": [null]}', "{}"])
+def test_garbled_index_files_do_not_traceback(tmp_path, capsys, bad):
+    path = tmp_path / "i.json"
+    path.write_text(bad)
+    assert run(path, "list") == 1
+    assert "Traceback" not in capsys.readouterr().err
+
+
+def test_vendor_in_the_index_cannot_choose_the_output_directory(tmp_path, capsys):
+    path = tmp_path / "i.json"
+    path.write_text(json.dumps({"schema": 1, "base_url": "https://example.com/b",
+                                "artifacts": [{**GOOD, "vendor": "x/../../../../PWNED"}]}))
+    assert run(path, "fetch", "runtime", "x/../../../../PWNED", "-o", str(tmp_path / "work/out")) == 1
+    assert not list(tmp_path.rglob("PWNED*"))

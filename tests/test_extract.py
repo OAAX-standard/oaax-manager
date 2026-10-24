@@ -62,3 +62,58 @@ def test_existing_destination_is_refused(tmp_path):
     (tmp_path / "d").mkdir()
     with pytest.raises(FetchError, match="already exists"):
         safe_extract(tmp_path / "a.tgz", tmp_path / "d")
+
+
+def make_chain_tar(path):
+    import io
+    import tarfile
+    with tarfile.open(path, "w:gz") as tar:
+        d = tarfile.TarInfo("x")
+        d.type = tarfile.DIRTYPE
+        tar.addfile(d)
+        for name, target in (("x/y", ".."), ("c", "x/y/..")):
+            info = tarfile.TarInfo(name)
+            info.type = tarfile.SYMTYPE
+            info.linkname = target
+            tar.addfile(info)
+        f = tarfile.TarInfo("c/pwn.txt")
+        f.size = 4
+        tar.addfile(f, io.BytesIO(b"evil"))
+
+
+@pytest.mark.parametrize("with_filter", [True, False])
+def test_symlink_chain_write_through_is_refused_on_every_python(tmp_path, monkeypatch, with_filter):
+    import tarfile
+    if not with_filter:  # Pythons before 3.9.17 / 3.10.12 / 3.11.4 have no tarfile.data_filter
+        monkeypatch.delattr(tarfile, "data_filter", raising=False)
+    make_chain_tar(tmp_path / "a.tgz")
+    work = tmp_path / "work"
+    work.mkdir()
+    with pytest.raises(FetchError, match="unsafe archive"):
+        safe_extract(tmp_path / "a.tgz", work / "d")
+    assert not (tmp_path / "pwn.txt").exists() and not (work / "pwn.txt").exists()
+
+
+@pytest.mark.parametrize("target", ["..", "../x", "a/../../x", "/etc/passwd", "C:/x", "a\\b"])
+def test_links_must_point_down(tmp_path, target):
+    make_tar(tmp_path / "a.tgz", {"ok.so": b"x"}, links={"l": target})
+    with pytest.raises(FetchError, match="unsafe archive"):
+        safe_extract(tmp_path / "a.tgz", tmp_path / "d")
+
+
+def test_nothing_is_written_through_an_archive_link(tmp_path):
+    import io
+    import tarfile
+    with tarfile.open(tmp_path / "a.tgz", "w:gz") as tar:
+        d = tarfile.TarInfo("real")
+        d.type = tarfile.DIRTYPE
+        tar.addfile(d)
+        link = tarfile.TarInfo("alias")
+        link.type = tarfile.SYMTYPE
+        link.linkname = "real"
+        tar.addfile(link)
+        f = tarfile.TarInfo("alias/file")
+        f.size = 1
+        tar.addfile(f, io.BytesIO(b"x"))
+    with pytest.raises(FetchError, match="written through a link"):
+        safe_extract(tmp_path / "a.tgz", tmp_path / "d")
