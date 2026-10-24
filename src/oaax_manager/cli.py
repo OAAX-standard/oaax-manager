@@ -1,0 +1,163 @@
+"""Command line: `oaax-manager list` and `oaax-manager fetch`."""
+
+from __future__ import annotations
+
+import argparse
+import sys
+from pathlib import Path
+
+from . import __version__
+from .download import FetchError, check_disk_space, download, safe_extract, sha256_file
+from .index import Artifact, IndexError_, host_platform, load_index, version_key
+
+
+class UserError(Exception):
+    """A mistake in the command line or an unsupported request: printed without traceback."""
+
+
+def human_size(size: int) -> str:
+    for unit in ("B", "KB", "MB", "GB"):
+        if size < 1000 or unit == "GB":
+            return f"{size:.0f} {unit}" if unit == "B" else f"{size:.1f} {unit}"
+        size /= 1000
+    raise AssertionError
+
+
+def describe(a: Artifact) -> str:
+    parts = [a.kind, a.vendor, a.version]
+    if a.variant:
+        parts.append(a.variant)
+    if a.kind == "runtime":
+        parts.append(f"{a.os}-{a.arch}")
+    return " ".join(parts)
+
+
+def cmd_list(args: argparse.Namespace, index: list[Artifact]) -> int:
+    host_os, host_arch = host_platform()
+    rows = [a for a in index if args.kind in (None, a.kind) and args.vendor in (None, a.vendor)]
+    rows.sort(key=lambda a: (a.kind, a.vendor, a.os, a.arch, a.variant or "", version_key(a.version)))
+    if not rows:
+        raise UserError("no artifact matches this filter (run `oaax-manager list` to see everything)")
+    header = ("KIND", "VENDOR", "VERSION", "VARIANT", "OS", "ARCH", "SIZE", "")
+    table = [header] + [
+        (a.kind, a.vendor, a.version, a.variant or "-", a.os, a.arch, human_size(a.size),
+         "*" if a.kind == "runtime" and a.matches_host(host_os, host_arch) else "")
+        for a in rows
+    ]
+    widths = [max(len(r[i]) for r in table) for i in range(len(header))]
+    for row in table:
+        print("  ".join(cell.ljust(w) for cell, w in zip(row, widths)).rstrip())
+    print(f"\n* = runtime for this machine ({host_os}-{host_arch}); toolchains are Docker images and run anywhere with Docker.")
+    return 0
+
+
+def resolve(args: argparse.Namespace, index: list[Artifact]) -> Artifact:
+    """Pick exactly one artifact or explain what to specify; never guess between variants."""
+    candidates = [a for a in index if a.kind == args.kind and a.vendor == args.vendor]
+    if not candidates:
+        known = sorted({a.vendor for a in index if a.kind == args.kind})
+        raise UserError(f"no {args.kind} for vendor {args.vendor!r}. Available: {', '.join(known)}")
+    if args.version:
+        candidates = [a for a in candidates if a.version == args.version]
+        if not candidates:
+            raise UserError(f"no {args.kind} {args.vendor} version {args.version}")
+    else:
+        newest = max(version_key(a.version) for a in candidates)
+        candidates = [a for a in candidates if version_key(a.version) == newest]
+    if args.kind == "runtime":
+        host_os, host_arch = host_platform()
+        want_os, want_arch = args.os or host_os, args.arch or host_arch
+        candidates = [a for a in candidates if a.os == want_os and a.arch == want_arch]
+        if not candidates:
+            raise UserError(
+                f"no {args.vendor} runtime for {want_os}-{want_arch}. "
+                "See `oaax-manager list --kind runtime`, or pass --os/--arch to fetch a build for another machine."
+            )
+    if args.variant:
+        candidates = [a for a in candidates if a.variant == args.variant]
+        if not candidates:
+            raise UserError(f"no {args.vendor} {args.kind} with variant {args.variant!r}")
+    if len(candidates) > 1:
+        options = ", ".join(sorted(a.variant or "-" for a in candidates))
+        raise UserError(f"several builds match; choose one with --variant ({options})")
+    return candidates[0]
+
+
+def cmd_fetch(args: argparse.Namespace, index: list[Artifact]) -> int:
+    artifact = resolve(args, index)
+    out = Path(args.output)
+    if artifact.kind == "toolchain":
+        return fetch_toolchain(artifact, out, args.force)
+    return fetch_runtime(artifact, out)
+
+
+def fetch_toolchain(a: Artifact, out: Path, force: bool) -> int:
+    dest = out / a.filename
+    if dest.exists() and not force and sha256_file(dest) == a.sha256:
+        print(f"{dest} is already downloaded and verified")
+    else:
+        print(f"Downloading {describe(a)} ({human_size(a.size)})")
+        check_disk_space(out, a.size)
+        download(a.url, dest, a.size, a.sha256)
+        print(f"Verified sha256 and saved {dest}")
+    print(f"Load it into Docker with:  docker load -i {dest}\n(the image name and tag come from the tar; check `docker image ls`)")
+    return 0
+
+
+def fetch_runtime(a: Artifact, out: Path) -> int:
+    name = "-".join(["runtime", a.vendor, a.version, a.os, a.arch] + ([a.variant] if a.variant else []))
+    dest = out / name
+    if dest.exists():
+        print(f"{dest} already exists; delete it to fetch it again")
+        return 0
+    print(f"Downloading {describe(a)} ({human_size(a.size)})")
+    check_disk_space(out, 3 * a.size)  # archive + extracted files
+    archive = out / f"{name}-{a.filename}"
+    download(a.url, archive, a.size, a.sha256)
+    files = safe_extract(archive, dest)
+    archive.unlink()
+    libs = [f for f in files if Path(f).name in ("libRuntimeLibrary.so", "RuntimeLibrary.dll")]
+    print(f"Verified and extracted {len(files)} files to {dest}")
+    for lib in libs:
+        print(f"Runtime library: {dest / lib}")
+    return 0
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(prog="oaax-manager", description="List and fetch OAAX runtimes and toolchains.")
+    parser.add_argument("--version", action="version", version=f"oaax-manager {__version__}")
+    parser.add_argument("--index", type=Path, help="use this index.json instead of the packaged one (mirrors, tests)")
+    sub = parser.add_subparsers(dest="command", required=True)
+
+    p_list = sub.add_parser("list", help="show the available artifacts")
+    p_list.add_argument("--kind", choices=("runtime", "toolchain"))
+    p_list.add_argument("--vendor")
+    p_list.set_defaults(func=cmd_list)
+
+    p_fetch = sub.add_parser("fetch", help="download and verify one artifact")
+    p_fetch.add_argument("kind", choices=("runtime", "toolchain"))
+    p_fetch.add_argument("vendor", help="see `oaax-manager list` (e.g. cpu, intel, nvidia-ort, nvidia-trt, hailo, deepx)")
+    p_fetch.add_argument("--artifact-version", dest="version", help="default: the newest in the index")
+    p_fetch.add_argument("--variant", help="needed when several builds exist (e.g. cuda12)")
+    p_fetch.add_argument("--os", choices=("linux", "windows", "macos"), help="runtimes only; default: this machine")
+    p_fetch.add_argument("--arch", choices=("x86_64", "aarch64"), help="runtimes only; default: this machine")
+    p_fetch.add_argument("-o", "--output", default=".", help="directory to write into (default: current directory)")
+    p_fetch.add_argument("--force", action="store_true", help="toolchains: download again even if already present and verified")
+    p_fetch.set_defaults(func=cmd_fetch)
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = build_parser().parse_args(argv)
+    try:
+        return args.func(args, load_index(args.index))
+    except (UserError, FetchError, IndexError_) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    except KeyboardInterrupt:
+        print("\ninterrupted (partial downloads are kept; run again to resume)", file=sys.stderr)
+        return 130
+
+
+if __name__ == "__main__":
+    sys.exit(main())

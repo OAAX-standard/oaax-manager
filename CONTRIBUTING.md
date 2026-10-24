@@ -10,4 +10,6 @@ Please read the [general OAAX contributing guide](https://github.com/OAAX-standa
 
 ## Development environment
 
-To be defined with the first implementation.
+```bash
+pip install -e ".[test]" && pytest
+```
