@@ -36,6 +36,7 @@ What it guarantees:
 - Runtimes are extracted all-or-nothing (into a temporary directory, renamed only on success) and the disk space is checked before downloading.
 - The same command on the same release always fetches the same bytes; the index is part of the release, never fetched at run time.
 - Runtime archives are checked before extraction: absolute paths, `..`, and links pointing outside the target are refused.
+- The archive rules are strict on purpose and identical on every OS: links must be relative and point down (no `..`), nothing is written through an archive link, and names that collide on Windows/macOS (case or Unicode variants, `CON`, `aux.*`, trailing dots/spaces, `:` or `\`) are refused. A future vendor archive that breaks them fails with a clear message instead of extracting something ambiguous; relax the rule in `src/oaax_manager/download.py` deliberately if a legitimate archive needs it.
 - It never picks between builds for you (CUDA version, HailoRT version): it lists the choices.
 - `fetch toolchain` only downloads the tar. It does not touch Docker; run `docker load` yourself. Gated vendor SDKs are not handled.
 

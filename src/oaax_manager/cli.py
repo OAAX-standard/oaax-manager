@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import shlex
 import subprocess
@@ -136,7 +137,8 @@ def fetch_runtime(a: Artifact, out: Path) -> int:
         try:
             files = safe_extract(archive, dest, a.sha256)
         finally:
-            archive.unlink(missing_ok=True)  # verified, but useless once extracted or refused
+            with contextlib.suppress(OSError):  # a locked archive must not turn a good extraction into an error
+                archive.unlink(missing_ok=True)  # verified, but useless once extracted or refused
     libs = [f for f in files if Path(f).name in ("libRuntimeLibrary.so", "RuntimeLibrary.dll")]
     print(f"Verified and extracted {len(files)} files to {dest}")
     for lib in libs:

@@ -25,6 +25,18 @@ class FetchError(Exception):
     """A user-facing failure (network, checksum, unsafe archive)."""
 
 
+def replace_with_retry(src: Path, dst: Path, attempts: int = 5) -> None:
+    """os.replace that survives a transient PermissionError (Windows: antivirus or indexer holding the file)."""
+    for attempt in range(1, attempts + 1):
+        try:
+            src.replace(dst)
+            return
+        except PermissionError:
+            if attempt == attempts:
+                raise
+            time.sleep(0.2 * attempt)
+
+
 def sha256_file(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as f:
@@ -89,7 +101,7 @@ def download(url: str, dest: Path, size: int, sha256: str) -> None:
             _transfer_with_retries(url, part, size)
         actual = sha256_file(part)
         if actual == sha256:
-            part.replace(dest)
+            replace_with_retry(part, dest)
             return
         part.unlink()
         if not resumed:
@@ -255,7 +267,7 @@ def safe_extract(archive: Path, dest: Path, sha256: str | None = None) -> list[s
                     tar.extract(member, root)
         _normalise_modes(root, members)
         (root / MARKER).write_text(json.dumps({"archive_sha256": sha256}))  # proves "fully extracted from a verified archive"
-        tmp.replace(dest)
+        replace_with_retry(tmp, dest)
     except Exception as exc:  # tarfile/zlib raise EOFError, KeyError, zlib.error, ... on broken archives
         shutil.rmtree(tmp, ignore_errors=True)
         if isinstance(exc, FetchError):

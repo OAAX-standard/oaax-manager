@@ -387,3 +387,109 @@ def test_options_that_do_not_apply_are_errors_not_ignored(bucket, capsys):
     assert "only apply to runtimes" in capsys.readouterr().err
     assert run(bucket[1], "fetch", "runtime", "cpu", "--force") == 1
     assert "only applies to toolchains" in capsys.readouterr().err
+
+
+# adversary final report: transient Windows failures
+def test_replace_retries_a_transient_permission_error(tmp_path, monkeypatch):
+    src, dst = tmp_path / "a", tmp_path / "b"
+    src.write_text("x")
+    real, calls = type(src).replace, []
+
+    def flaky(self, target):
+        calls.append(1)
+        if len(calls) < 3:
+            raise PermissionError("locked by antivirus")
+        return real(self, target)
+
+    monkeypatch.setattr(type(src), "replace", flaky)
+    download.replace_with_retry(src, dst)
+    assert dst.read_text() == "x" and len(calls) == 3
+
+
+def test_a_permanently_locked_replace_still_fails(tmp_path, monkeypatch):
+    monkeypatch.setattr(type(tmp_path), "replace", lambda self, t: (_ for _ in ()).throw(PermissionError("locked")))
+    with pytest.raises(PermissionError):
+        download.replace_with_retry(tmp_path / "a", tmp_path / "b", attempts=2)
+
+
+def test_a_locked_archive_does_not_fail_a_good_extraction(bucket, tmp_path, monkeypatch, capsys):
+    real_unlink = type(tmp_path).unlink
+
+    def unlink(self, missing_ok=False):
+        if self.name.endswith("library.tar.gz"):
+            raise PermissionError("locked by antivirus")
+        return real_unlink(self, missing_ok=missing_ok)
+
+    monkeypatch.setattr(type(tmp_path), "unlink", unlink)
+    assert run(bucket[1], "fetch", "runtime", "cpu", "-o", str(tmp_path / "o")) == 0
+    assert (tmp_path / "o/runtime-cpu-2.0.0-linux-x86_64/libRuntimeLibrary.so").exists()
+
+
+# adversary final report: mutations that survived (tests that could not fail)
+def test_versions_order_numerically():
+    from oaax_manager.index import version_key
+    assert version_key("2.10.0") > version_key("2.9.0") > version_key("2.0.0")
+    assert max(["2.9.0", "2.10.0", "2.2.0"], key=version_key) == "2.10.0"
+
+
+@pytest.mark.parametrize("system, machine, expected", [
+    ("Linux", "x86_64", ("linux", "x86_64")), ("Linux", "aarch64", ("linux", "aarch64")),
+    ("Darwin", "arm64", ("macos", "aarch64")), ("Darwin", "x86_64", ("macos", "x86_64")),
+    ("Windows", "AMD64", ("windows", "x86_64")), ("Windows", "ARM64", ("windows", "aarch64")),
+    ("FreeBSD", "riscv64", ("freebsd", "riscv64")),
+])
+def test_host_platform_spellings(monkeypatch, system, machine, expected):
+    import platform
+    from oaax_manager import index
+    monkeypatch.setattr(platform, "system", lambda: system)
+    monkeypatch.setattr(platform, "machine", lambda: machine)
+    assert index.host_platform() == expected
+
+
+@pytest.mark.parametrize("base, ok", [
+    ("https://example.com/b", True), ("http://127.0.0.1:8080/b", True), ("http://localhost:9/b", True),
+    ("http://localhost.evil.com/b", False), ("http://127.0.0.1.evil.com/b", False),
+    ("http://127.0.0.1@evil.com/b", False), ("http://evil.com/b", False), ("ftp://127.0.0.1/b", False),
+    ("file:///etc/passwd", False),
+])
+def test_base_url_rules(tmp_path, base, ok):
+    from oaax_manager.index import IndexError_, load_index
+    path = tmp_path / "i.json"
+    path.write_text(json.dumps({"schema": 1, "base_url": base, "artifacts": []}))
+    if ok:
+        assert load_index(path) == []
+    else:
+        with pytest.raises(IndexError_):
+            load_index(path)
+
+
+class FakeResponse:
+    def __init__(self, status, content_range=None):
+        self.status = status
+        self.headers = {} if content_range is None else {"Content-Range": content_range}
+
+
+@pytest.mark.parametrize("status, content_range, ok", [
+    (206, "bytes 100-199/200", True), (206, "bytes 0-199/200", False), (206, "bytes 101-199/200", False),
+    (206, None, False), (206, "garbage", False), (200, "bytes 100-199/200", False), (200, None, False),
+])
+def test_resume_requires_a_matching_content_range(status, content_range, ok):
+    assert download._resumes_at(FakeResponse(status, content_range), 100) is ok
+
+
+@POSIX_ONLY
+def test_directory_and_file_modes(tmp_path):
+    with tarfile.open(tmp_path / "a.tgz", "w:gz") as tar:
+        for name, mode in (("d700", 0o700), ("d777", 0o777), ("d750", 0o750)):
+            info = tarfile.TarInfo(name)
+            info.type = tarfile.DIRTYPE
+            info.mode = mode
+            tar.addfile(info)
+        for name, mode in (("d700/f600", 0o600), ("d777/f100", 0o100), ("d750/f444", 0o444)):
+            info = tarfile.TarInfo(name)
+            info.mode = mode
+            tar.addfile(info)
+    safe_extract(tmp_path / "a.tgz", tmp_path / "d", "a" * 64)
+    mode = lambda n: (tmp_path / "d" / n).stat().st_mode & 0o7777  # noqa: E731
+    assert [mode(n) for n in ("d700", "d777", "d750")] == [0o755] * 3
+    assert [mode(n) for n in ("d700/f600", "d777/f100", "d750/f444")] == [0o644, 0o755, 0o644]
