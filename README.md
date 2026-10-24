@@ -18,12 +18,13 @@ python tools/build_pyz.py                                         # or one self-
 ## Use
 
 ```bash
-oaax-manager list                                  # everything available; * marks runtimes for this machine
+oaax-manager list                                  # everything available; * marks runtimes built for this OS/CPU (several variants may match)
 oaax-manager list --kind toolchain --vendor intel
 
 oaax-manager fetch runtime cpu                     # picks this machine's OS/arch, extracts to ./runtime-cpu-2.0.0-<os>-<arch>/
 oaax-manager fetch runtime nvidia-ort --variant cuda12   # several builds exist: you must choose (the error lists them)
 oaax-manager fetch runtime cpu --os linux --arch aarch64 -o ./runtimes
+oaax-manager fetch runtime cpu --artifact-version 2.0.0     # default: the newest version available for your platform
 oaax-manager fetch toolchain intel -o ./toolchains # saves the Docker image tar, then: docker load -i <file>
 # an existing runtime directory is never overwritten; delete it to fetch again
 ```

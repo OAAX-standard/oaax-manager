@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import contextlib
+import errno
 import hashlib
 import json
 import os
 import re
 import shutil
+import ssl
 import sys
 import tarfile
 import time
@@ -34,15 +36,19 @@ def sha256_file(path: Path) -> str:
 _last_decile = -1
 
 
+def _size(n: int) -> str:
+    return f"{n / 1e6:.1f} MB" if n >= 1e6 else f"{n / 1e3:.1f} KB"
+
+
 def _progress(done: int, total: int) -> None:
     """Live percentage on a terminal; one line per 10 % when output is piped or logged."""
     global _last_decile
     percent = 100 * done // max(total, 1)
     if sys.stderr.isatty():
-        print(f"\r  {done / 1e6:8.1f} / {total / 1e6:.1f} MB ({percent}%)", end="", file=sys.stderr)
+        print(f"\r  {_size(done)} / {_size(total)} ({percent}%)", end="", file=sys.stderr)
     elif percent // 10 != _last_decile:
         _last_decile = percent // 10
-        print(f"  {done / 1e6:.0f} / {total / 1e6:.0f} MB ({percent}%)", file=sys.stderr, flush=True)
+        print(f"  {_size(done)} / {_size(total)} ({percent}%)", file=sys.stderr, flush=True)
 
 
 @contextlib.contextmanager
@@ -114,7 +120,10 @@ def _resumes_at(response, have: int) -> bool:
 
 
 class ServerError(FetchError):
-    """The server misbehaves (more data than the index says): not retried."""
+    """A failure that retrying cannot fix (server misbehaves, HTTP 4xx, TLS trust, no space, no permission)."""
+
+
+PERMANENT_ERRNO = {errno.ENOSPC, errno.EACCES, errno.EPERM, errno.EROFS, errno.EISDIR, errno.ENOTDIR, errno.EDQUOT}
 
 
 def _transfer(url: str, part: Path, have: int, size: int) -> None:
@@ -142,7 +151,20 @@ def _transfer(url: str, part: Path, have: int, size: int) -> None:
             if have == size and response.read(1):
                 part.unlink(missing_ok=True)
                 raise ServerError(f"{url} sent more data than the indexed size ({size} bytes)")
-    except (urllib.error.URLError, OSError) as exc:
+    except urllib.error.HTTPError as exc:
+        if 400 <= exc.code < 500 and exc.code not in (408, 429):
+            raise ServerError(f"download failed for {url}: HTTP {exc.code} {exc.reason}") from exc
+        raise FetchError(f"download failed for {url}: HTTP {exc.code} {exc.reason} (run the same command again to resume)") from exc
+    except urllib.error.URLError as exc:
+        if isinstance(exc.reason, ssl.SSLCertVerificationError):
+            raise ServerError(
+                f"TLS certificate verification failed for {url}: {exc.reason}\n"
+                "On macOS with a python.org Python, run its 'Install Certificates.command'; otherwise check the system clock and proxy."
+            ) from exc
+        raise FetchError(f"download failed for {url}: {exc.reason} (run the same command again to resume)") from exc
+    except OSError as exc:
+        if exc.errno in PERMANENT_ERRNO:
+            raise ServerError(f"cannot write {part}: {exc.strerror}") from exc
         raise FetchError(f"download failed for {url}: {exc} (run the same command again to resume)") from exc
     finally:
         if sys.stderr.isatty():

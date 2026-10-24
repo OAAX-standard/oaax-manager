@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import argparse
 import json
+import shlex
+import subprocess
 import sys
 from pathlib import Path
 
@@ -22,6 +24,11 @@ def human_size(size: int) -> str:
             return f"{size:.0f} {unit}" if unit == "B" else f"{size:.1f} {unit}"
         size /= 1000
     raise AssertionError
+
+
+def quote(path: Path) -> str:
+    """Shell-safe spelling of a path for a command we print for the user to copy."""
+    return subprocess.list2cmdline([str(path)]) if sys.platform == "win32" else shlex.quote(str(path))
 
 
 def describe(a: Artifact) -> str:
@@ -85,6 +92,10 @@ def resolve(args: argparse.Namespace, index: list[Artifact]) -> Artifact:
 
 
 def cmd_fetch(args: argparse.Namespace, index: list[Artifact]) -> int:
+    if args.kind == "toolchain" and (args.os or args.arch):
+        raise UserError("--os/--arch only apply to runtimes (toolchains are Docker images)")
+    if args.kind == "runtime" and args.force:
+        raise UserError("--force only applies to toolchains; delete the runtime directory to fetch it again")
     artifact = resolve(args, index)
     out = Path(args.output)
     if artifact.kind == "toolchain":
@@ -106,7 +117,7 @@ def fetch_toolchain(a: Artifact, out: Path, force: bool) -> int:
             check_disk_space(out, a.size)
             download(a.url, dest, a.size, a.sha256)
             print(f"Verified sha256 and saved {dest}")
-    print(f"Load it into Docker with:  docker load -i {dest}\n(the image name and tag come from the tar; check `docker image ls`)")
+    print(f"Load it into Docker with:  docker load -i {quote(dest)}\n(the image name and tag come from the tar; check `docker image ls`)")
     return 0
 
 

@@ -24,6 +24,9 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 BASE_URL = "https://nbg1.your-objectstorage.com/oaax"
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
+from oaax_manager.index import validate_entry  # noqa: E402  (the loader's own rules: never write what it would reject)
+
 INDEX = Path(__file__).resolve().parent.parent / "src" / "oaax_manager" / "index.json"
 PARTIAL = INDEX.with_name("index.partial.json")  # finished entries of an interrupted run (git-ignored)
 
@@ -77,6 +80,12 @@ def catalog_from_listing(text: str) -> list[dict]:
     items, skipped = [], []
     for key, size in parse_listing(text):
         item = classify(key, size)
+        if item:
+            try:
+                validate_entry({**item, "sha256": "0" * 64})
+            except ValueError as exc:
+                print(f"skipped (invalid name, the CLI would reject it): {exc}", file=sys.stderr)
+                continue
         (items if item else skipped).append(item or key)
     for key in skipped:
         print(f"skipped (not a runtime/toolchain archive): {key}", file=sys.stderr)

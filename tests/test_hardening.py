@@ -297,3 +297,92 @@ def test_duplicates_with_odd_spellings_are_refused(tmp_path, names):
             tar.addfile(tarfile.TarInfo(n))
     with pytest.raises(FetchError, match="collides"):
         safe_extract(tmp_path / "a.tgz", tmp_path / "d")
+
+
+# F17: the generator never writes what the loader rejects
+@pytest.mark.parametrize("key", [
+    "runtimes/2.1.0-rc1/CPU/x86_64/Ubuntu/library.tar.gz",
+    "runtimes/2.0.0/NVIDIA_ORT/x86_64/Ubuntu/library-CUDA_12.tar.gz",
+    "runtimes/2.0.0/NVIDIA_ORT/x86_64/Ubuntu/library-cuda 12.tar.gz",
+    "runtimes/2.0.0/NVIDIA_ORT/x86_64/Ubuntu/library-v2~beta.tar.gz",
+    "runtimes/2.0.0/NVIDIA_ORT/x86_64/Ubuntu/library-.hidden.tar.gz",
+])
+def test_generator_skips_names_the_loader_would_reject(capsys, key):
+    text = f"2026-10-24 11:26  5  s3://oaax/{key}\n2026-10-24 11:26  5  s3://oaax/runtimes/2.0.0/CPU/x86_64/Ubuntu/library.tar.gz\n"
+    catalog = gen_index.catalog_from_listing(text)
+    assert [i["key"] for i in catalog] == ["runtimes/2.0.0/CPU/x86_64/Ubuntu/library.tar.gz"]
+    assert "skipped" in capsys.readouterr().err
+
+
+def test_every_entry_the_generator_makes_from_the_real_listing_loads(tmp_path):
+    from pathlib import Path
+    data = Path(__file__).parent / "data"
+    text = "\n".join(p.read_text() for p in sorted(data.glob("listing-*.txt")))
+    entries = [{**i, "sha256": "a" * 64, "etag": "e"} for i in gen_index.catalog_from_listing(text)]
+    path = tmp_path / "i.json"
+    path.write_text(json.dumps({"schema": 1, "base_url": "https://example.com", "artifacts": entries}))
+    from oaax_manager.index import load_index
+    assert len(load_index(path)) == 43
+
+
+# F18
+def test_docker_load_hint_is_quoted(bucket, tmp_path, capsys):
+    out = tmp_path / "my dir"
+    assert run(bucket[1], "fetch", "toolchain", "cpu", "-o", str(out)) == 0
+    hint = [l for l in capsys.readouterr().out.splitlines() if "docker load" in l][0]
+    import shlex
+    assert shlex.split(hint.split("docker load -i ", 1)[1].split("\n")[0])[0] == str(out / "tool.tar")
+
+
+def test_small_files_do_not_report_zero_megabytes(bucket, tmp_path, capsys):
+    run(bucket[1], "fetch", "toolchain", "cpu", "-o", str(tmp_path / "o"))
+    err = capsys.readouterr().err
+    assert "0.0 / 0.0 MB" not in err and "12.0 KB / 12.0 KB (100%)" in err
+
+
+def test_permanent_errors_are_not_retried(bucket, tmp_path, monkeypatch, capsys):
+    import ssl
+    import urllib.error
+    import urllib.request
+    calls = []
+
+    def fail(exc):
+        def urlopen(request, timeout=None):
+            calls.append(1)
+            raise exc
+        return urlopen
+
+    cases = [
+        (urllib.error.HTTPError("u", 404, "Not Found", {}, None), "HTTP 404"),
+        (urllib.error.URLError(ssl.SSLCertVerificationError("self-signed certificate")), "certificate verification failed"),
+        (OSError(28, "No space left on device"), "No space left"),
+    ]
+    for exc, text in cases:
+        calls.clear()
+        monkeypatch.setattr(download.urllib.request, "urlopen", fail(exc))
+        assert run(bucket[1], "fetch", "toolchain", "cpu", "-o", str(tmp_path / "o")) == 1
+        err = capsys.readouterr().err
+        assert text in err and "resume" not in err and len(calls) == 1, (text, err, calls)
+
+
+def test_a_5xx_is_retried(bucket, tmp_path, monkeypatch):
+    import urllib.error
+    calls = []
+    real = download.urllib.request.urlopen
+
+    def flaky(request, timeout=None):
+        calls.append(1)
+        if len(calls) == 1:
+            raise urllib.error.HTTPError("u", 503, "Unavailable", {}, None)
+        return real(request, timeout=timeout)
+
+    monkeypatch.setattr(download.urllib.request, "urlopen", flaky)
+    assert run(bucket[1], "fetch", "toolchain", "cpu", "-o", str(tmp_path / "o")) == 0
+    assert len(calls) == 2
+
+
+def test_options_that_do_not_apply_are_errors_not_ignored(bucket, capsys):
+    assert run(bucket[1], "fetch", "toolchain", "cpu", "--os", "windows") == 1
+    assert "only apply to runtimes" in capsys.readouterr().err
+    assert run(bucket[1], "fetch", "runtime", "cpu", "--force") == 1
+    assert "only applies to toolchains" in capsys.readouterr().err
