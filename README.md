@@ -49,6 +49,11 @@ The NVIDIA TensorRT conversion `.whl` in the bucket is not indexed (it is a Pyth
 Today the vendor CI re-uploads `2.0.0` artifacts on every build, so a pinned hash can go stale: the CLI then fails with a clear
 message instead of installing something unverified. Immutable per-release artifacts are the real fix.
 
+## Builds and releases
+
+CI (`.github/workflows/build.yml`) builds a reproducible wheel and `oaax-manager.pyz` on every push to `main` and keeps them for 30 days as workflow
+artifacts (with `SHA256SUMS`). Pushing a tag `vX.Y.Z` (must equal `__version__`) also attaches them to a GitHub Release. Nothing is published to PyPI.
+
 ## Development
 
 ```bash
