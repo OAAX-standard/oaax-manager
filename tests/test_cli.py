@@ -75,7 +75,7 @@ def test_sha_mismatch_fails_and_leaves_nothing(bucket, monkeypatch, tmp_path, ca
     out = tmp_path / "out"
     assert run(index, "fetch", "runtime", "cpu", "-o", str(out)) == 1
     assert "mismatch" in capsys.readouterr().err
-    assert not [p for p in out.rglob("*") if p.is_file()]
+    assert not [p for p in out.rglob("*") if p.is_file() and not p.name.endswith(".lock")]
 
 
 def test_ambiguous_variant_is_not_guessed(bucket, monkeypatch, capsys):
@@ -163,7 +163,7 @@ def test_not_enough_disk_space_fails_before_downloading(bucket, monkeypatch, tmp
     monkeypatch.setattr(shutil, "disk_usage", lambda p: usage(10, 10, 1))
     assert run(bucket[1], "fetch", "runtime", "cpu", "-o", str(tmp_path / "o")) == 1
     assert "not enough disk space" in capsys.readouterr().err
-    assert not list((tmp_path / "o").iterdir())
+    assert not [p for p in (tmp_path / "o").iterdir() if not p.name.endswith(".lock")]
 
 
 def test_transient_failure_is_retried_and_resumed(bucket, monkeypatch, tmp_path):
@@ -248,7 +248,7 @@ def test_endless_body_is_cut_at_the_indexed_size(tmp_path, monkeypatch, capsys):
     finally:
         httpd.shutdown()
     assert code == 1 and "more data than the indexed size" in capsys.readouterr().err
-    assert not list(out.glob("*")), "no .part or file may stay"
+    assert not [p for p in out.glob("*") if not p.name.endswith(".lock")], "no .part or file may stay"
     assert len(sent) < 100  # and it was not retried or drained to the end
 
 
@@ -262,7 +262,7 @@ def test_announced_length_above_index_is_refused_before_writing(bucket, tmp_path
     out = tmp_path / "o"
     assert run(index_path, "fetch", "toolchain", "cpu", "-o", str(out)) == 1
     assert "announces" in capsys.readouterr().err
-    assert not list(out.glob("*"))
+    assert not [p for p in out.glob("*") if not p.name.endswith(".lock")]
 
 
 # ---- hostile index (adversary F3) ----

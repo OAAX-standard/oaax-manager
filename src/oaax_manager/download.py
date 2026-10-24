@@ -47,9 +47,9 @@ def _progress(done: int, total: int) -> None:
 
 @contextlib.contextmanager
 def fetch_lock(target: Path):
-    """Refuse to run twice for the same target: an advisory lock on `<target>.lock` (flock / msvcrt, no stale locks)."""
+    """Refuse to run twice for the same target: an advisory lock on `.<target>.lock` (flock / msvcrt, no stale locks)."""
     target.parent.mkdir(parents=True, exist_ok=True)
-    path = target.with_name(target.name + ".lock")
+    path = target.with_name(f".{target.name}.lock")
     handle = open(path, "a+b")
     try:
         try:
@@ -63,9 +63,7 @@ def fetch_lock(target: Path):
             raise FetchError(f"another oaax-manager is already fetching {target.name} (lock: {path})") from None
         yield
     finally:
-        handle.close()  # releases the lock
-        with contextlib.suppress(OSError):
-            path.unlink()
+        handle.close()  # releases the lock; the empty file is never deleted (unlinking a held lock file is racy)
 
 
 def download(url: str, dest: Path, size: int, sha256: str) -> None:

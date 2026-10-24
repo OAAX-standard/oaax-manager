@@ -79,7 +79,18 @@ def test_concurrent_fetch_is_refused(bucket, tmp_path, capsys):
         assert run(bucket[1], "fetch", "toolchain", "cpu", "-o", str(out)) == 1
         assert "another oaax-manager is already fetching" in capsys.readouterr().err
     assert run(bucket[1], "fetch", "toolchain", "cpu", "-o", str(out)) == 0
-    assert not list(out.glob("*.lock"))
+
+
+def test_a_refused_run_does_not_free_the_lock_for_a_third(tmp_path):
+    """Adversary F6b: B failing to lock must not delete the lock file, or C would get a fresh one."""
+    target = tmp_path / "t.tar"
+    with fetch_lock(target):
+        for _ in range(2):  # B, then C
+            with pytest.raises(FetchError, match="another oaax-manager"):
+                with fetch_lock(target):
+                    pass
+    with fetch_lock(target):  # free again once A is done
+        pass
 
 
 # F7: a refused archive does not stay behind
@@ -91,7 +102,7 @@ def test_failed_extraction_removes_the_verified_archive(server, make_index, tmp_
     out = tmp_path / "o"
     for _ in range(2):
         assert run(index, "fetch", "runtime", "cpu", "-o", str(out)) == 1
-        assert not [p for p in out.iterdir() if p.is_file()] and not [p for p in out.iterdir() if p.is_dir()]
+        assert not [p for p in out.iterdir() if not p.name.endswith(".lock")]
 
 
 # F8: a stale or foreign .part is replaced, not blamed on upstream
