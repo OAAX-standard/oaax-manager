@@ -35,10 +35,14 @@ jobs:
           uv build --wheel --out-dir dist2
           uv run --no-project python tools/build_pyz.py dist2/oaax-manager.pyz
           (cd dist2 && sha256sum -c ../dist/SHA256SUMS)
-      - name: Release notes (dry run on every build; fails if CHANGELOG.md lacks this version)
+      - name: Release notes (dry run on every build; fails if CHANGELOG.md lacks this version, on a tag also if it is still "unreleased")
+        shell: bash
         run: |
           version=$(uv run --no-project python -c "import re,pathlib;print(re.search(r'__version__ = .(.+?).$', pathlib.Path('src/oaax_manager/__init__.py').read_text(), re.M)[1])")
-          uv run --no-project python tools/release_notes.py "$version" dist/SHA256SUMS | tee release-notes.md
+          final=; if [ "$GITHUB_REF_TYPE" = tag ]; then final=--final; fi
+          uv run --no-project python tools/release_notes.py "$version" dist/SHA256SUMS $final > release-notes.md
+          test -s release-notes.md
+          cat release-notes.md
       - name: The tag must match the package version
         if: startsWith(github.ref, 'refs/tags/v')
         run: |
