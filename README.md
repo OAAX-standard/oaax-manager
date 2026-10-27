@@ -35,12 +35,14 @@ oaax-manager fetch runtime cpu --os linux --arch aarch64 -o ./runtimes
 oaax-manager fetch runtime cpu --artifact-version 2.0.0     # default: the newest version available for your platform
 oaax-manager fetch toolchain intel -o ./toolchains # saves <name>-<version>.tar, then: docker load -i <file>
 # an existing runtime directory is never overwritten; delete it to fetch again. Running the same command again re-checks its files against
-# the sha256 recorded at extraction and fails, naming the file, if one is missing or changed.
+# the sha256 and permissions recorded at extraction and fails, naming the file, if one is missing or changed (files you added are not checked).
 ```
 
 What it guarantees:
 - Every download is verified against the sha256 pinned in the package's `index.json`; a mismatch is an error and nothing is extracted.
-- Interrupted downloads resume (`*.part` file) and transient network errors are retried; run the same command again if it still fails.
+- Interrupted downloads resume (`*.part` file) and transient network errors are retried; run the same command again if it still fails. A link slower than 10 KB/s (averaged over 60 s) is reported once, not retried: the `.part` is kept for the next run.
+- A size that differs from the pinned one (a vendor re-upload) is reported as such: upgrade oaax-manager. The `-o` directory, or a toolchain `.tar` in it, may be a link to another disk.
+- Known limitation: if a run is killed (`kill -9`) between the download and the end of the extraction, the verified archive stays in the output directory and the next run downloads it again; delete the leftover `runtime-*.tar.gz` yourself.
 - Runtimes are extracted all-or-nothing (into a temporary directory, renamed only on success) and the disk space is checked before downloading.
 - The same command on the same release always fetches the same bytes; the index is part of the release, never fetched at run time.
 - Runtime archives are checked before extraction: absolute paths, `..`, and links pointing outside the target are refused.

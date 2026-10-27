@@ -10,7 +10,7 @@ import sys
 from pathlib import Path
 
 from . import __version__
-from .download import FetchError, check_disk_space, download, fetch_lock, safe_extract, sha256_file, verify_extracted
+from .download import FetchError, check_disk_space, download, fetch_lock, part_bytes, safe_extract, sha256_file, verify_extracted
 from .index import Artifact, IndexError_, host_platform, load_index, version_key
 
 
@@ -81,9 +81,10 @@ def resolve(args: argparse.Namespace, index: list[Artifact]) -> Artifact:
                 "Pass --os/--arch to fetch a build for another machine."
             )
     if args.version:
+        versions = sorted({a.version for a in candidates}, key=version_key)
         candidates = [a for a in candidates if a.version == args.version]
         if not candidates:
-            raise UserError(f"no {args.kind} {args.vendor} version {args.version}{where}")
+            raise UserError(f"no {args.kind} {args.vendor} version {args.version}{where}. Versions available{where}: {', '.join(versions)}")
     if args.variant:  # before the newest-version pick: the newest version may not have the build you asked for
         wanted = [a for a in candidates if a.variant == args.variant]
         if not wanted:
@@ -123,16 +124,20 @@ def toolchain_filename(a: Artifact) -> str:
 
 def fetch_toolchain(a: Artifact, out: Path, force: bool) -> int:
     dest = out / toolchain_filename(a)
-    if out.resolve() not in dest.resolve().parents:
+    if dest.parent.resolve() != out.resolve():  # the name's own directory, not where dest points: the tar may be a link to another disk
         raise FetchError(f"refusing to write outside {out}")
     if dest.is_dir():
         raise UserError(f"{dest} is a directory")
     with fetch_lock(dest):
-        if dest.is_file() and not force and sha256_file(dest) == a.sha256:
+        verified = False
+        if dest.is_file() and not force and dest.stat().st_size == a.size:  # another size cannot match: no need to hash it
+            print(f"Checking the existing {dest.name} ({human_size(a.size)}); hashing it can take a while ...")
+            verified = sha256_file(dest) == a.sha256
+        if verified:
             print(f"{dest} is already downloaded and verified")
         else:
             print(f"Downloading {describe(a)} ({human_size(a.size)})")
-            check_disk_space(out, a.size)
+            check_disk_space(out, a.size - part_bytes(dest))
             download(a.url, dest, a.size, a.sha256)
             print(f"Verified sha256 and saved {dest}")
     print(f"Load it into Docker with:  docker load -i {quote(dest)}\n(the image name and tag come from the tar; check `docker image ls`)")
@@ -142,14 +147,14 @@ def fetch_toolchain(a: Artifact, out: Path, force: bool) -> int:
 def fetch_runtime(a: Artifact, out: Path) -> int:
     name = "-".join(["runtime", a.vendor, a.version, a.os, a.arch] + ([a.variant] if a.variant else []))
     dest = out / name
-    if out.resolve() not in dest.resolve().parents:
+    if dest.parent.resolve() != out.resolve():
         raise FetchError(f"refusing to write outside {out}")
     with fetch_lock(dest):
         if dest.exists() or dest.is_symlink():
             return report_existing(dest, a)
         print(f"Downloading {describe(a)} ({human_size(a.size)})")
-        check_disk_space(out, 3 * a.size)  # archive + extracted files
         archive = out / f"{name}-{a.filename}"
+        check_disk_space(out, 3 * a.size - part_bytes(archive))  # archive + extracted files, minus what an interrupted run already downloaded
         download(a.url, archive, a.size, a.sha256)
         try:
             files = safe_extract(archive, dest, a.sha256)
@@ -163,10 +168,12 @@ def fetch_runtime(a: Artifact, out: Path) -> int:
 
 def report_existing(dest: Path, a: Artifact) -> int:
     """An existing target counts as done only if this tool completed it for this exact build and its files are still what was extracted."""
+    print(f"Checking the extracted files of {dest} (hashing them can take a while) ...")
     files = verify_extracted(dest, a.sha256)
     if files is None:
         raise UserError(f"{dest} exists but was not completed by this oaax-manager for this build; delete it and run again")
-    print(f"{dest} is already fetched: its {len(files)} files still match the sha256 recorded when they were extracted from the verified archive ({a.sha256[:12]}...); delete it to fetch again")
+    print(f"{dest} is already fetched: its {len(files)} files still match the sha256 and permissions recorded when they were extracted "
+          f"from the verified archive ({a.sha256[:12]}...); files you added are not checked; delete it to fetch again")
     print_libraries(dest, files)
     return 0
 

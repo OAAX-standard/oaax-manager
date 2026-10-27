@@ -897,3 +897,175 @@ def test_an_https_origin_cannot_make_us_request_a_local_http_service(tmp_path):
     finally:
         victim.shutdown()
         victim.server_close()
+
+
+# adversary round 2, batch B3-B12
+class _LongChunked(socketserver.StreamRequestHandler):
+    """A chunked body that is complete but two bytes LONGER than the pin (no Content-Length to compare)."""
+
+    def handle(self):
+        while self.rfile.readline() not in (b"\r\n", b""):
+            pass
+        body = DATA + b"zz"
+        self.wfile.write(b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n" + b"%x\r\n" % len(body) + body + b"\r\n0\r\n\r\n")
+
+
+def test_b3_a_chunked_body_longer_than_the_pin_says_to_upgrade(tmp_path, monkeypatch):
+    monkeypatch.setattr(download.time, "sleep", lambda s: None)
+    httpd = socketserver.ThreadingTCPServer(("127.0.0.1", 0), _LongChunked)
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    try:
+        with pytest.raises(download.ServerError, match="upgrade oaax-manager"):
+            download.download(f"http://127.0.0.1:{httpd.server_address[1]}/f", tmp_path / "f", len(DATA), hashlib.sha256(DATA).hexdigest())
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
+
+
+@pytest.mark.parametrize("code,expect", [(11, "already fetching"), (35, "already fetching"), (37, "cannot lock")])
+def test_b4_only_a_held_lock_means_already_fetching(tmp_path, monkeypatch, code, expect):
+    """B4: any OSError of the lock call used to read "another oaax-manager is already fetching" (NFS/FUSE: ENOLCK)."""
+    import errno
+
+    chosen = {11: errno.EAGAIN, 35: errno.EWOULDBLOCK, 37: errno.ENOLCK}[code]
+    monkeypatch.setattr(download, "_try_lock", lambda handle: (_ for _ in ()).throw(OSError(chosen, os.strerror(chosen))))
+    with pytest.raises(FetchError, match=expect):
+        with fetch_lock(tmp_path / "x"):
+            pass
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="creating symlinks needs a privilege on Windows")
+def test_b5_a_toolchain_tar_that_is_a_link_to_another_disk_is_not_refused(bucket, tmp_path, capsys):
+    other = tmp_path / "other-disk"
+    other.mkdir()
+    out = tmp_path / "o"
+    out.mkdir()
+    (other / "big.tar").write_bytes(b"docker-image" * 1000)  # already the right bytes
+    (out / "tool-2.0.0.tar").symlink_to(other / "big.tar")
+    assert run(bucket[1], "fetch", "toolchain", "cpu", "-o", str(out)) == 0
+    assert "already downloaded and verified" in capsys.readouterr().out
+    assert (other / "big.tar").read_bytes() == b"docker-image" * 1000
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="creating symlinks needs a privilege on Windows")
+def test_b5_a_link_to_other_content_is_replaced_never_written_through(bucket, tmp_path):
+    other = tmp_path / "other-disk"
+    other.mkdir()
+    out = tmp_path / "o"
+    out.mkdir()
+    (other / "precious").write_text("PRECIOUS")
+    (out / "tool-2.0.0.tar").symlink_to(other / "precious")
+    assert run(bucket[1], "fetch", "toolchain", "cpu", "-o", str(out)) == 0
+    assert (other / "precious").read_text() == "PRECIOUS"
+    assert (out / "tool-2.0.0.tar").read_bytes() == b"docker-image" * 1000 and not (out / "tool-2.0.0.tar").is_symlink()
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX permission bits")
+def test_b6_changed_permissions_or_extra_files(fetched, capsys):
+    index, dest = fetched
+    (dest / "extra.txt").write_text("mine")  # added by the user: tolerated and said so
+    capsys.readouterr()
+    assert run(index, "fetch", "runtime", "cpu", "-o", str(dest.parent)) == 0
+    assert "permissions" in capsys.readouterr().out
+    (dest / "libRuntimeLibrary.so").chmod(0o4777)
+    assert run(index, "fetch", "runtime", "cpu", "-o", str(dest.parent)) == 1
+    assert "other permissions" in capsys.readouterr().err
+
+
+def _tar_with(path, build):
+    with tarfile.open(path, "w:gz") as tar:
+        build(tar)
+
+
+def _add(tar, name, data=None, kind=tarfile.REGTYPE, linkname=""):
+    import io
+
+    info = tarfile.TarInfo(name)
+    info.type, info.linkname = kind, linkname
+    if kind == tarfile.REGTYPE:
+        info.size = len(data)
+        tar.addfile(info, io.BytesIO(data))
+    else:
+        info.mode = 0o755
+        tar.addfile(info)
+
+
+def test_b7_an_archive_without_a_regular_file_installs_nothing(server, make_index, tmp_path, monkeypatch, capsys):
+    root, _ = server
+    (root / "rt").mkdir()
+    _tar_with(root / "rt/empty.tar.gz", lambda t: (_add(t, "d", kind=tarfile.DIRTYPE), _add(t, "link", kind=tarfile.SYMTYPE, linkname="d")))
+    index = make_index([entry(root, "rt/empty.tar.gz")])
+    monkeypatch.setattr(cli, "host_platform", lambda: ("linux", "x86_64"))
+    out = tmp_path / "o"
+    assert run(index, "fetch", "runtime", "cpu", "-o", str(out)) == 1
+    assert "contains no file" in capsys.readouterr().err
+    assert [p.name for p in out.iterdir() if not p.name.startswith(".")] == []
+
+
+def test_b7_hard_links_are_counted_the_same_on_the_first_run_and_the_rerun(server, make_index, tmp_path, monkeypatch, capsys):
+    root, _ = server
+    (root / "rt").mkdir()
+    _tar_with(root / "rt/hl.tar.gz", lambda t: (_add(t, "libRuntimeLibrary.so", b"so"), _add(t, "copy.so", kind=tarfile.LNKTYPE, linkname="libRuntimeLibrary.so")))
+    index = make_index([entry(root, "rt/hl.tar.gz")])
+    monkeypatch.setattr(cli, "host_platform", lambda: ("linux", "x86_64"))
+    out = tmp_path / "o"
+    assert run(index, "fetch", "runtime", "cpu", "-o", str(out)) == 0
+    first = capsys.readouterr().out
+    assert run(index, "fetch", "runtime", "cpu", "-o", str(out)) == 0
+    second = capsys.readouterr().out
+    assert "extracted 2 files" in first and "its 2 files" in second
+
+
+@pytest.mark.parametrize("name", [".OAAX-MANAGER.JSON", "./.Oaax-Manager.Json", ".oaax-manager.json"])
+def test_b8_the_marker_name_is_reserved_in_any_case(tmp_path, name):
+    archive = tmp_path / "a.tar.gz"
+    _tar_with(archive, lambda t: _add(t, name, b"x"))
+    with pytest.raises(FetchError, match="reserved"):
+        safe_extract(archive, tmp_path / "dest", "0" * 64)
+
+
+def test_b9_a_slow_link_is_reported_once_not_retried_silently(tmp_path, monkeypatch):
+    calls = []
+
+    def slow(url, part, have, size):
+        calls.append(1)
+        raise download.SlowDownload("download of x is too slow: check the connection, then run the same command again to resume")
+
+    monkeypatch.setattr(download, "_transfer", slow)
+    monkeypatch.setattr(download.time, "sleep", lambda s: pytest.fail("a slow link must not be retried"))
+    with pytest.raises(download.SlowDownload, match="run the same command again"):
+        download._transfer_with_retries("http://x/f", tmp_path / "f.part", 100)
+    assert len(calls) == 1
+
+
+def test_b10_the_release_waits_for_the_tests():
+    root = os.path.join(os.path.dirname(__file__), "..", ".github", "workflows")
+    build, tests = (open(os.path.join(root, f)).read() for f in ("build.yml", "test.yml"))
+    assert "workflow_call:" in tests and "uses: ./.github/workflows/test.yml" in build and "needs: [build, tests]" in build
+
+
+def test_b11_an_existing_toolchain_of_another_size_is_not_hashed_and_the_part_counts_for_the_disk(bucket, tmp_path, monkeypatch, capsys):
+    out = tmp_path / "o"
+    out.mkdir()
+    (out / "tool-2.0.0.tar").write_bytes(b"wrong size")
+    (out / "tool-2.0.0.tar.part").write_bytes(b"x" * 5000)
+    monkeypatch.setattr(cli, "sha256_file", lambda p: pytest.fail("a file of another size was hashed"))
+    needed = []
+    real = cli.check_disk_space
+    monkeypatch.setattr(cli, "check_disk_space", lambda d, n: (needed.append(n), real(d, n))[1])
+    assert run(bucket[1], "fetch", "toolchain", "cpu", "-o", str(out)) == 0
+    assert needed == [12000 - 5000]
+
+
+def test_b11_a_rerun_says_it_is_checking(fetched, capsys):
+    index, dest = fetched
+    capsys.readouterr()
+    assert run(index, "fetch", "runtime", "cpu", "-o", str(dest.parent)) == 0
+    assert "Checking the extracted files" in capsys.readouterr().out
+
+
+def test_b12_an_unknown_version_lists_the_versions_that_exist(server, make_index, tmp_path, monkeypatch, capsys):
+    index = _two_version_index(server, make_index, tmp_path, ["hailort4.18.0"], ["hailort4.18.0"])
+    monkeypatch.setattr(cli, "host_platform", lambda: ("linux", "x86_64"))
+    assert run(index, "fetch", "runtime", "hailo", "--artifact-version", "2.0") == 1
+    assert "Versions available for linux-x86_64: 2.0.0, 2.1.0" in capsys.readouterr().err

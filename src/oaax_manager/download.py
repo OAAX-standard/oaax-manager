@@ -11,6 +11,7 @@ import os
 import re
 import shutil
 import ssl
+import stat
 import sys
 import tarfile
 import time
@@ -68,6 +69,19 @@ def _progress(done: int, total: int) -> None:
         print(f"  {_size(done)} / {_size(total)} ({percent}%)", file=sys.stderr, flush=True)
 
 
+# What a lock that is held by someone else raises: flock(LOCK_NB) on POSIX, msvcrt.locking(LK_NBLCK) on Windows. Anything else is a different problem.
+LOCKED_ERRNO = {errno.EAGAIN, errno.EWOULDBLOCK} | ({errno.EACCES, errno.EDEADLK} if sys.platform == "win32" else set())
+
+
+def _try_lock(handle) -> None:
+    if sys.platform == "win32":
+        import msvcrt
+        msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+    else:
+        import fcntl
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+
 @contextlib.contextmanager
 def fetch_lock(target: Path):
     """Refuse to run twice for the same target: an advisory lock on `.<target>.lock` (flock / msvcrt, no stale locks)."""
@@ -81,14 +95,11 @@ def fetch_lock(target: Path):
         raise FetchError(f"cannot use the lock file {path}: {exc.strerror} (a link there? delete it and run again)") from exc
     try:
         try:
-            if sys.platform == "win32":
-                import msvcrt
-                msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
-            else:
-                import fcntl
-                fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except OSError:
-            raise FetchError(f"another oaax-manager is already fetching {target.name} (lock: {path})") from None
+            _try_lock(handle)
+        except OSError as exc:
+            if exc.errno in LOCKED_ERRNO:
+                raise FetchError(f"another oaax-manager is already fetching {target.name} (lock: {path})") from None
+            raise FetchError(f"cannot lock {path}: {exc.strerror} (some network and FUSE file systems have no file locks: use -o on a local disk)") from exc
         yield
     finally:
         handle.close()  # releases the lock; the empty file is never deleted (unlinking a held lock file is racy)
@@ -183,6 +194,10 @@ class ServerError(FetchError):
     """A failure that retrying cannot fix (server misbehaves, HTTP 4xx, TLS trust, no space, no permission)."""
 
 
+class SlowDownload(ServerError):
+    """Too slow for the guard: retrying the same link would only wait out the same window again (the .part is kept for the next run)."""
+
+
 PERMANENT_ERRNO = {errno.ENOSPC, errno.EACCES, errno.EPERM, errno.EROFS, errno.EISDIR, errno.ENOTDIR, errno.EDQUOT}
 
 
@@ -213,14 +228,14 @@ def _transfer(url: str, part: Path, have: int, size: int) -> None:
                     now = time.monotonic()
                     if now - window_start >= SLOW_WINDOW:
                         if window_bytes < MIN_RATE * (now - window_start):
-                            raise FetchError(
+                            raise SlowDownload(
                                 f"download of {url} is too slow (under {MIN_RATE // 1000} KB/s for {SLOW_WINDOW} s): "
                                 "check the connection, then run the same command again to resume"
                             )
                         window_start, window_bytes = now, 0
             if have == size and _more_data(response):
                 part.unlink(missing_ok=True)
-                raise ServerError(f"{url} sent more data than the indexed size ({size} bytes)")
+                raise ServerError(f"{url} sent more data than the indexed size ({size} bytes)\n{STALE_PIN}")
     except urllib.error.HTTPError as exc:
         if exc.code == 416 and have:  # the object is shorter than the pinned size (a re-upload): the .part can never be completed
             part.unlink(missing_ok=True)
@@ -271,7 +286,7 @@ def _check_member(member: tarfile.TarInfo, root: Path, links: set[str], seen: se
     parts = PurePosixPath(name).parts
     if ".." in parts or not (root / name).resolve().is_relative_to(root):
         raise FetchError(f"unsafe archive: {name!r} escapes the target directory")
-    if PurePosixPath(name).parts == (MARKER,):
+    if _fold(name.rstrip("/")) == _fold(MARKER):  # case-insensitive file systems would let it overwrite the marker
         raise FetchError(f"unsafe archive: {name!r} is reserved for oaax-manager")
     if member.isdev() or member.isfifo():
         raise FetchError(f"unsafe archive: special file {name!r}")
@@ -331,15 +346,18 @@ def safe_extract(archive: Path, dest: Path, sha256: str | None = None) -> list[s
                 else:
                     tar.extract(member, root)
         _normalise_modes(root, members)
+        manifest = _manifest(root, members)
+        if not manifest["files"]:
+            raise FetchError(f"{archive.name} contains no file (only directories or links): the artifact is broken upstream, nothing was installed; please report it")
         # Proves "fully extracted from a verified archive", and records what was extracted so a rerun can check it still is.
-        (root / MARKER).write_text(json.dumps({"archive_sha256": sha256, **_manifest(root, members)}))
+        (root / MARKER).write_text(json.dumps({"archive_sha256": sha256, **manifest}))
         replace_with_retry(tmp, dest)
     except Exception as exc:  # tarfile/zlib raise EOFError, KeyError, zlib.error, ... on broken archives
         shutil.rmtree(tmp, ignore_errors=True)
         if isinstance(exc, FetchError):
             raise
         raise FetchError(f"cannot extract {archive.name}: {type(exc).__name__}: {exc}") from exc
-    return sorted(m.name for m in members if m.isfile())
+    return sorted(manifest["files"])  # the same list a rerun re-checks (hard links of the archive are plain files once extracted)
 
 
 def _manifest(root: Path, members: list[tarfile.TarInfo]) -> dict:
@@ -349,7 +367,7 @@ def _manifest(root: Path, members: list[tarfile.TarInfo]) -> dict:
         if path.is_symlink():
             links[member.name] = os.readlink(path)
         elif path.is_file():  # also hard links of the archive, which are plain files once extracted
-            files[member.name] = {"size": path.stat().st_size, "sha256": sha256_file(path)}
+            files[member.name] = {"size": path.stat().st_size, "sha256": sha256_file(path), "mode": stat.S_IMODE(path.stat().st_mode)}
     return {"files": files, "links": links}
 
 
@@ -361,6 +379,8 @@ def verify_extracted(dest: Path, sha256: str) -> list[str] | None:
     try:
         marker = json.loads((dest / MARKER).read_text())
         files, links = marker["files"], marker["links"]
+        for want in files.values():
+            want["mode"]  # a marker without the permissions is the older format
         if marker["archive_sha256"] != sha256:
             return None
     except (OSError, ValueError, KeyError, TypeError):
@@ -373,6 +393,8 @@ def verify_extracted(dest: Path, sha256: str) -> list[str] | None:
             raise FetchError(f"{path} is missing or no longer a regular file; delete {dest} and run again")
         try:
             changed = path.stat().st_size != want["size"] or sha256_file(path) != want["sha256"]
+            if sys.platform != "win32" and stat.S_IMODE(path.stat().st_mode) != want["mode"]:  # e.g. a setuid or world-writable library
+                raise FetchError(f"{path} has other permissions than when it was extracted ({oct(stat.S_IMODE(path.stat().st_mode))}, not {oct(want['mode'])}); delete {dest} and run again")
         except OSError as exc:
             raise FetchError(f"cannot read {path}: {exc.strerror}; fix its permissions, or delete {dest} and run again") from exc
         if changed:
@@ -384,8 +406,14 @@ def verify_extracted(dest: Path, sha256: str) -> list[str] | None:
     return sorted(files)
 
 
+def part_bytes(target: Path) -> int:
+    """What an interrupted earlier run already downloaded for `target` (its .part), so the disk check does not ask for it twice."""
+    part = target.with_name(target.name + ".part")
+    return part.stat().st_size if part.is_file() and not part.is_symlink() else 0
+
+
 def check_disk_space(directory: Path, needed: int) -> None:
     directory.mkdir(parents=True, exist_ok=True)
     free = shutil.disk_usage(directory).free
-    if free < needed:
+    if free < max(needed, 0):
         raise FetchError(f"not enough disk space in {directory}: need about {needed / 1e9:.1f} GB, {free / 1e9:.1f} GB free")
