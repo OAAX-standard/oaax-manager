@@ -2,7 +2,7 @@
 
 All notable changes to oaax-manager. Versions follow [semver](https://semver.org/); the artifact index (`index.json`) is part of each release.
 
-## [0.1.0] - unreleased
+## [0.1.0] - 2026-10-27
 
 First release.
 
