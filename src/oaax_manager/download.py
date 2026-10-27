@@ -186,7 +186,7 @@ def _transfer(url: str, part: Path, have: int, size: int) -> None:
                 f"TLS certificate verification failed for {url}: {exc.reason}\n"
                 "On macOS with a python.org Python, run its 'Install Certificates.command'; otherwise check the system clock and proxy."
             ) from exc
-        raise FetchError(f"download failed for {url}: {exc.reason} (run the same command again to resume)") from exc
+        raise FetchError(f"download failed for {url}: {exc.reason} (check your network or proxy, then run the same command again to resume)") from exc
     except OSError as exc:
         if exc.errno in PERMANENT_ERRNO:
             raise ServerError(f"cannot write {part}: {exc.strerror}") from exc

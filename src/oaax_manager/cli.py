@@ -69,11 +69,12 @@ def resolve(args: argparse.Namespace, index: list[Artifact]) -> Artifact:
     if args.kind == "runtime":
         host_os, host_arch = host_platform()
         want_os, want_arch = args.os or host_os, args.arch or host_arch
+        platforms = sorted({f"{a.os}-{a.arch}" for a in candidates})
         candidates = [a for a in candidates if a.os == want_os and a.arch == want_arch]
         if not candidates:
             raise UserError(
-                f"no {args.vendor} runtime for {want_os}-{want_arch}. "
-                "See `oaax-manager list --kind runtime`, or pass --os/--arch to fetch a build for another machine."
+                f"no {args.vendor} runtime for {want_os}-{want_arch}. Available for {args.vendor}: {', '.join(platforms)}. "
+                "Pass --os/--arch to fetch a build for another machine."
             )
     if args.version:
         candidates = [a for a in candidates if a.version == args.version]
@@ -193,7 +194,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"error: {exc}", file=sys.stderr)
         return 1
     except OSError as exc:  # unwritable or conflicting output path, disk errors
-        print(f"error: {exc}", file=sys.stderr)
+        print(f"error: {exc} (check that the output directory, -o, exists and is writable)", file=sys.stderr)
         return 1
     except KeyboardInterrupt:
         print("\ninterrupted (partial downloads are kept; run again to resume)", file=sys.stderr)

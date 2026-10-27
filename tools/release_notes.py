@@ -27,7 +27,7 @@ def notes(version: str, sums: str) -> str:
         f"{section}\n\n"
         "## Checksums (sha256)\n\n"
         f"```\n{sums.strip()}\n```\n\n"
-        "Install: `uv tool install oaax-manager-<version>-py3-none-any.whl`, or run `python oaax-manager.pyz list`.\n"
+        "Install: `uv tool install ./oaax_manager-<version>-py3-none-any.whl`, or run `python oaax-manager.pyz list`.\n"
     )
 
 
