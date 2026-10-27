@@ -45,14 +45,11 @@ jobs:
           version=$(uv run --no-project python -c "import re,pathlib;print(re.search(r'__version__ = .(.+?).$', pathlib.Path('src/oaax_manager/__init__.py').read_text(), re.M)[1])")
           test "${GITHUB_REF_NAME}" = "v$version" || { echo "tag $GITHUB_REF_NAME != version $version"; exit 1; }
       - name: Smoke test the wheel in a clean venv (index.json inside, exit codes work)
-        run: |
-          wheel=$(ls dist/*.whl)
-          uvx --isolated --from "$wheel" oaax-manager list | head -5
-          if uvx --isolated --from "$wheel" oaax-manager fetch runtime nosuch; then echo "expected a failure"; exit 1; fi
+        shell: bash
+        run: tools/smoke.sh uvx --isolated --from "$(ls dist/*.whl)" oaax-manager
       - name: Smoke test the pyz
-        run: |
-          uv run --no-project python dist/oaax-manager.pyz list | head -5
-          if uv run --no-project python dist/oaax-manager.pyz fetch runtime nosuch; then echo "expected a failure"; exit 1; fi
+        shell: bash
+        run: tools/smoke.sh uv run --no-project python dist/oaax-manager.pyz
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: oaax-manager-${{ github.sha }}
