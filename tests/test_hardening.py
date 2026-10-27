@@ -822,3 +822,78 @@ def test_an_unreadable_extracted_file_says_which_one_and_what_to_do(fetched, cap
         (dest / "dep.so").chmod(0o644)
     err = capsys.readouterr().err
     assert "cannot read" in err and "dep.so" in err and "permissions" in err and "output directory" not in err
+
+
+# adversary round 2: B1 (a re-upload with another size) and B2 (https origin redirecting to a local http service)
+class _Object(http.server.BaseHTTPRequestHandler):
+    """Serves `self.server.data`; answers a Range request beyond the end with 416 (RFC 7233)."""
+
+    def do_GET(self):
+        data = self.server.data
+        self.server.requests.append(self.headers.get("Range"))
+        rng = self.headers.get("Range")
+        if rng:
+            start = int(rng.split("=")[1].rstrip("-"))
+            if start >= len(data):
+                self.send_response(416)
+                self.send_header("Content-Range", f"bytes */{len(data)}")
+                self.end_headers()
+                return
+            self.send_response(206)
+            self.send_header("Content-Range", f"bytes {start}-{len(data) - 1}/{len(data)}")
+            body = data[start:]
+        else:
+            self.send_response(200)
+            body = data
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    log_message = lambda *a: None  # noqa: E731
+
+
+@pytest.fixture
+def object_server():
+    started = []
+
+    def start(data):
+        httpd = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _Object)
+        httpd.data, httpd.requests = data, []
+        threading.Thread(target=httpd.serve_forever, daemon=True).start()
+        started.append(httpd)
+        return httpd, f"http://127.0.0.1:{httpd.server_address[1]}/f"
+
+    yield start
+    for httpd in started:
+        httpd.shutdown()
+        httpd.server_close()
+
+
+@pytest.mark.parametrize("served", [len(DATA) - 10, len(DATA) + 10])
+def test_a_reupload_with_another_size_says_to_upgrade_and_leaves_no_part(object_server, tmp_path, monkeypatch, served):
+    """B1: a smaller object looped on HTTP 416 forever with a stale .part; a larger one gave no upgrade hint. Only an equal size got the message."""
+    monkeypatch.setattr(download.time, "sleep", lambda s: None)
+    httpd, url = object_server((DATA + DATA)[:served])
+    for _ in range(2):  # the second run must not be stuck on a leftover
+        with pytest.raises(download.ServerError, match="upgrade oaax-manager"):
+            download.download(url, tmp_path / "f", len(DATA), hashlib.sha256(DATA).hexdigest())
+        assert not (tmp_path / "f.part").exists() and not (tmp_path / "f").exists()
+
+
+def test_an_https_origin_cannot_make_us_request_a_local_http_service(tmp_path):
+    """B2: any redirect to http://127.0.0.1:<port>/<path> was followed; the localhost exception is for a localhost base_url only."""
+    victim = http.server.HTTPServer(("127.0.0.1", 0), _Object)
+    victim.data, victim.requests = b"x", []
+    threading.Thread(target=victim.serve_forever, daemon=True).start()
+    handler = download._HttpsOnlyRedirects()
+    req = download.urllib.request.Request("https://example.invalid/f")
+    try:
+        with pytest.raises(download.ServerError, match="only https is allowed"):
+            handler.redirect_request(req, None, 302, "Found", {}, f"http://127.0.0.1:{victim.server_address[1]}/internal-admin/reset")
+        # tests and mirrors on a localhost http base_url keep working
+        local = download.urllib.request.Request("http://127.0.0.1:1/f")
+        assert handler.redirect_request(local, None, 302, "Found", {}, "http://127.0.0.1:2/g") is not None
+        assert victim.requests == []
+    finally:
+        victim.shutdown()
+        victim.server_close()

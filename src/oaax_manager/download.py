@@ -94,6 +94,12 @@ def fetch_lock(target: Path):
         handle.close()  # releases the lock; the empty file is never deleted (unlinking a held lock file is racy)
 
 
+STALE_PIN = (
+    "The artifact changed upstream after this oaax-manager release (2.0.0 files are still re-uploaded on "
+    "every vendor build): upgrade oaax-manager, or report it if it is already the latest."
+)
+
+
 def download(url: str, dest: Path, size: int, sha256: str) -> None:
     """Download `url` to `dest` (resuming `dest.part`), then verify size and sha256.
 
@@ -118,19 +124,17 @@ def download(url: str, dest: Path, size: int, sha256: str) -> None:
         part.unlink()
         if not resumed:
             break
-    raise FetchError(
-        f"sha256 mismatch for {url}\n  expected {sha256}\n  got      {actual}\n"
-        "The artifact changed upstream after this oaax-manager release (2.0.0 files are still re-uploaded on "
-        "every vendor build): upgrade oaax-manager, or report it if it is already the latest."
-    )
+    raise FetchError(f"sha256 mismatch for {url}\n  expected {sha256}\n  got      {actual}\n{STALE_PIN}")
 
 
 class _HttpsOnlyRedirects(urllib.request.HTTPRedirectHandler):
     """The index only allows https (http for localhost); a redirect must not lead anywhere else (http://, ftp://, file://)."""
 
     def redirect_request(self, req, fp, code, msg, headers, newurl):
-        parsed = urllib.parse.urlparse(newurl)
-        if parsed.scheme != "https" and not (parsed.scheme == "http" and parsed.hostname in ("127.0.0.1", "localhost")):
+        parsed, origin = urllib.parse.urlparse(newurl), urllib.parse.urlparse(req.full_url)
+        local = lambda u: u.scheme == "http" and u.hostname in ("127.0.0.1", "localhost")  # noqa: E731
+        # http is only for tests against a localhost base_url: an https origin must never make us GET a local http service
+        if parsed.scheme != "https" and not (local(parsed) and local(origin)):
             raise ServerError(f"{req.full_url} redirects to {newurl}: only https is allowed")
         return super().redirect_request(req, fp, code, msg, headers, newurl)
 
@@ -193,9 +197,9 @@ def _transfer(url: str, part: Path, have: int, size: int) -> None:
                 response.close()
                 return _transfer(url, part, 0, size)
             announced = response.headers.get("Content-Length")
-            if announced is not None and announced.isdigit() and int(announced) > size - have:
+            if announced is not None and announced.isdigit() and int(announced) != size - have:  # larger or smaller than the pinned size: a re-upload
                 part.unlink(missing_ok=True)
-                raise ServerError(f"{url} announces {announced} bytes but only {size - have} are expected")
+                raise ServerError(f"{url} announces {announced} bytes but {size - have} are expected\n{STALE_PIN}")
             window_start, window_bytes = time.monotonic(), 0
             with _open_part(part, append=bool(have)) as out:
                 while have < size:
@@ -218,6 +222,9 @@ def _transfer(url: str, part: Path, have: int, size: int) -> None:
                 part.unlink(missing_ok=True)
                 raise ServerError(f"{url} sent more data than the indexed size ({size} bytes)")
     except urllib.error.HTTPError as exc:
+        if exc.code == 416 and have:  # the object is shorter than the pinned size (a re-upload): the .part can never be completed
+            part.unlink(missing_ok=True)
+            raise ServerError(f"{url} cannot continue at byte {have} (HTTP 416): it is shorter than the {size} bytes this release pins\n{STALE_PIN}") from exc
         if 400 <= exc.code < 500 and exc.code not in (408, 429):
             raise ServerError(f"download failed for {url}: HTTP {exc.code} {exc.reason}") from exc
         raise FetchError(f"download failed for {url}: HTTP {exc.code} {exc.reason} (run the same command again to resume)") from exc
