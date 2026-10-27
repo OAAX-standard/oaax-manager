@@ -26,7 +26,7 @@ Needs [uv](https://docs.astral.sh/uv/) (it also provides Python 3.9+ if you have
 | Command | What it does |
 | ------- | ------------ |
 | `oaax-manager list [--kind K] [--vendor V]` | everything available; `*` marks runtimes built for this OS/CPU (several variants may match) |
-| `oaax-manager fetch runtime <vendor>` | picks this machine's OS/arch, extracts to `./runtime-<vendor>-<version>-<os>-<arch>/` |
+| `oaax-manager fetch runtime <vendor>` | picks this machine's OS/arch, extracts to `./runtime-<vendor>-<version>-<os>-<arch>[-<variant>]/` (the hidden `.oaax-manager.json` inside records what was extracted) |
 | `oaax-manager fetch toolchain <vendor>` | saves `<name>-<version>.tar`; then `docker load -i <file>` |
 
 ```bash
@@ -53,6 +53,7 @@ Running the same command again **re-checks** its files against the sha256 and pe
   - absolute paths and `..` are refused;
   - links must be relative and point down, and nothing is written through an archive link;
   - names that collide on Windows/macOS (case or Unicode variants, `CON`, `aux.*`, trailing dots/spaces, `:` or `\`) are refused.
+- Exotic members (a hard link to a symbolic link) are extracted as the running Python's `tarfile` does, as a link or as a file; both are safe.
 - A future vendor archive that breaks the rules fails with a clear message instead of extracting something ambiguous. If a legitimate archive needs it, relax the rule deliberately in `src/oaax_manager/download.py`.
 
 **Resilient downloads**
@@ -67,7 +68,7 @@ Running the same command again **re-checks** its files against the sha256 and pe
 
 ## Limits
 
-- **After `kill -9`:** if a run is killed between the download and the end of the extraction, the verified archive stays in the output directory and the next run downloads it again. Delete the leftover `runtime-*.tar.gz` yourself.
+- **Interrupted extraction** (Ctrl-C, `kill -9`): run the same command again. A leftover `<dir>.extracting` folder is removed, and the verified archive is reused without downloading it again. Only a kill right after the final rename can leave a `runtime-*.tar.gz` behind: delete it yourself.
 - **macOS:** no OAAX runtime is published for macOS yet, so `fetch runtime` says so. Toolchains are Docker images and work wherever Docker runs.
 - **Vendor SDKs** that are behind a login are not handled.
 

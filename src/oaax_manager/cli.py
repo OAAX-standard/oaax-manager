@@ -155,15 +155,24 @@ def fetch_runtime(a: Artifact, out: Path) -> int:
         print(f"Downloading {describe(a)} ({human_size(a.size)})")
         archive = out / f"{name}-{a.filename}"
         check_disk_space(out, 3 * a.size - part_bytes(archive))  # archive + extracted files, minus what an interrupted run already downloaded
-        download(a.url, archive, a.size, a.sha256)
+        if archive.is_file() and sha256_file(archive) == a.sha256:  # kept by an interrupted extraction: verified, nothing to download
+            print(f"Using the verified archive left by an earlier run: {archive}")
+        else:
+            download(a.url, archive, a.size, a.sha256)
         try:
             files = safe_extract(archive, dest, a.sha256)
-        finally:
-            with contextlib.suppress(OSError):  # a locked archive must not turn a good extraction into an error
-                archive.unlink(missing_ok=True)  # verified, but useless once extracted or refused
+        except Exception:
+            _discard(archive)  # refused or broken: the verified archive is useless
+            raise
+        _discard(archive)  # extracted: no longer needed. Not on Ctrl-C: the next run extracts it without downloading again
     print(f"Verified and extracted {len(files)} files to {dest}")
     print_libraries(dest, files)
     return 0
+
+
+def _discard(archive: Path) -> None:
+    with contextlib.suppress(OSError):  # a locked archive must not turn a good extraction into an error
+        archive.unlink(missing_ok=True)
 
 
 def report_existing(dest: Path, a: Artifact) -> int:
@@ -213,6 +222,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"error: oaax-manager needs Python 3.9 or newer (this is {sys.version.split()[0]})", file=sys.stderr)
         return 1
     args = build_parser().parse_args(argv)
+    sys.stdout.reconfigure(line_buffering=True)  # piped (`| tee log`), stdout is block-buffered and printed after the progress lines of stderr
     try:
         return args.func(args, load_index(args.index))
     except (UserError, FetchError, IndexError_) as exc:
@@ -222,7 +232,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"error: {exc} (check that the output directory, -o, exists and is writable)", file=sys.stderr)
         return 1
     except KeyboardInterrupt:
-        print("\ninterrupted (partial downloads are kept; run again to resume)", file=sys.stderr)
+        print("\ninterrupted (what was downloaded is kept; run the same command again to resume)", file=sys.stderr)
         return 130
 
 

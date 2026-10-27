@@ -1111,3 +1111,42 @@ def test_a_read_only_output_directory_does_not_blame_a_link(tmp_path):
     finally:
         out.chmod(0o755)
     assert "link" not in str(caught.value) and "writable" in str(caught.value)
+
+
+# adversary final pass: E4 (Ctrl-C during extraction), E7 (piped output order), E8 (proxy hint)
+def test_ctrl_c_during_extraction_removes_the_temp_dir_and_keeps_the_verified_archive(bucket, tmp_path, monkeypatch, capsys):
+    """E4: `<dest>.extracting` was left behind and the verified archive deleted, so a 1 GB runtime was downloaded again after every Ctrl-C."""
+    monkeypatch.setattr(cli, "host_platform", lambda: ("linux", "x86_64"))
+    out = tmp_path / "o"
+
+    def interrupted(*args, **kwargs):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(download, "_normalise_modes", interrupted)  # called inside the extraction, after the temp dir exists
+    assert run(bucket[1], "fetch", "runtime", "cpu", "-o", str(out)) == 130
+    assert not list(out.glob("*.extracting")) and not (out / "runtime-cpu-2.0.0-linux-x86_64").exists()
+    archives = list(out.glob("runtime-*.tar.gz"))
+    assert len(archives) == 1
+    monkeypatch.undo()
+    monkeypatch.setattr(cli, "host_platform", lambda: ("linux", "x86_64"))
+    monkeypatch.setattr(download, "download", lambda *a, **k: pytest.fail("the verified archive must be reused, not downloaded again"))
+    monkeypatch.setattr(cli, "download", download.download)
+    capsys.readouterr()
+    assert run(bucket[1], "fetch", "runtime", "cpu", "-o", str(out)) == 0
+    assert "verified archive left by an earlier run" in capsys.readouterr().out
+    assert not list(out.glob("runtime-*.tar.gz")) and (out / "runtime-cpu-2.0.0-linux-x86_64" / "libRuntimeLibrary.so").exists()
+
+
+def test_piped_output_keeps_the_header_before_the_progress_lines(bucket, tmp_path):
+    """E7: stdout is block-buffered when piped, so "Downloading ..." came after the progress lines of stderr."""
+    import subprocess
+
+    done = subprocess.run([sys.executable, "-m", "oaax_manager", "--index", str(bucket[1]), "fetch", "toolchain", "cpu", "-o", str(tmp_path / "o")],
+                          capture_output=False, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, cwd=str(tmp_path),
+                          env={**os.environ, "PYTHONPATH": os.path.join(os.path.dirname(__file__), "..", "src")})
+    assert done.returncode == 0, done.stdout
+    assert 0 <= done.stdout.index("Downloading") < done.stdout.index("%")
+
+
+def test_a_hash_mismatch_also_names_a_proxy_or_captive_portal():
+    assert "captive portal" in download.STALE_PIN and "upgrade oaax-manager" in download.STALE_PIN
