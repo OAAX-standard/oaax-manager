@@ -74,6 +74,8 @@ def fetch_lock(target: Path):
     target.parent.mkdir(parents=True, exist_ok=True)
     path = target.with_name(f".{target.name}.lock")
     try:  # never follow a link planted at the lock path: it would create or touch a file somewhere else
+        if path.is_symlink():  # Windows has no O_NOFOLLOW
+            raise OSError(errno.ELOOP, "is a symbolic link")
         handle = os.fdopen(os.open(path, os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_BINARY", 0), 0o644), "a+b")
     except OSError as exc:
         raise FetchError(f"cannot use the lock file {path}: {exc.strerror} (a link there? delete it and run again)") from exc
@@ -146,6 +148,8 @@ def _more_data(response) -> bool:
 
 def _open_part(part: Path, append: bool):
     """Open the .part for writing without following a symlink planted there (O_NOFOLLOW; Windows has none, but plants there need admin)."""
+    if part.is_symlink():  # Windows has no O_NOFOLLOW; the flag below covers the race on POSIX
+        raise OSError(errno.ELOOP, "refusing to write through a symbolic link", str(part))
     flags = os.O_WRONLY | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_BINARY", 0) | (os.O_APPEND if append else os.O_TRUNC)
     return os.fdopen(os.open(part, flags, 0o644), "ab" if append else "wb")
 
