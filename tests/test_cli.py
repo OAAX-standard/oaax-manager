@@ -252,6 +252,32 @@ def test_endless_body_is_cut_at_the_indexed_size(tmp_path, monkeypatch, capsys):
     assert len(sent) < 100  # and it was not retried or drained to the end
 
 
+def test_slow_loris_server_is_cut_off_with_a_clear_error(tmp_path, monkeypatch, capsys):
+    """One byte every 0.2 s never trips the 60 s socket timeout: the throughput guard must."""
+    import time
+    from oaax_manager import download
+    real_sleep = time.sleep  # monkeypatching download.time.sleep patches the shared time module
+    monkeypatch.setattr(download.time, "sleep", lambda s: None)
+    monkeypatch.setattr(download, "SLOW_WINDOW", 1)  # 1 s window at >= 10 KB/s; the server gives ~5 B/s
+
+    def dribble(w):
+        for _ in range(100):
+            w.write(b"x")
+            w.flush()
+            real_sleep(0.2)
+
+    httpd = raw_server(dribble)
+    started = time.monotonic()
+    try:
+        out = tmp_path / "o"
+        code = run(index_for(tmp_path, f"http://127.0.0.1:{httpd.server_address[1]}", 1_000_000), "fetch", "toolchain", "cpu", "-o", str(out))
+    finally:
+        httpd.shutdown()
+    err = capsys.readouterr().err
+    assert code == 1 and "too slow" in err and "run the same command again to resume" in err
+    assert time.monotonic() - started < 15  # 3 attempts of ~1 s, not 100 x 0.2 s x retries
+
+
 def test_announced_length_above_index_is_refused_before_writing(bucket, tmp_path, capsys):
     root, index_path = bucket
     cfg = json.loads(index_path.read_text())

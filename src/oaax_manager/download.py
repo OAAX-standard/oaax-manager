@@ -19,6 +19,9 @@ import urllib.request
 from pathlib import Path, PurePosixPath, PureWindowsPath
 
 CHUNK = 1 << 20
+# Slow-loris guard: `timeout=60` only limits silence, a server sending one byte a minute never trips it.
+SLOW_WINDOW = 60  # seconds; in every window at least MIN_RATE bytes/s must arrive on average
+MIN_RATE = 10_000
 
 
 class FetchError(Exception):
@@ -152,14 +155,24 @@ def _transfer(url: str, part: Path, have: int, size: int) -> None:
             if announced is not None and announced.isdigit() and int(announced) > size - have:
                 part.unlink(missing_ok=True)
                 raise ServerError(f"{url} announces {announced} bytes but only {size - have} are expected")
+            window_start, window_bytes = time.monotonic(), 0
             with part.open("ab" if have else "wb") as out:
                 while have < size:
-                    chunk = response.read(min(CHUNK, size - have))
+                    chunk = response.read1(min(CHUNK, size - have))  # read() would wait for the whole chunk
                     if not chunk:
                         break
                     out.write(chunk)
                     have += len(chunk)
+                    window_bytes += len(chunk)
                     _progress(have, size)
+                    now = time.monotonic()
+                    if now - window_start >= SLOW_WINDOW:
+                        if window_bytes < MIN_RATE * (now - window_start):
+                            raise FetchError(
+                                f"download of {url} is too slow (under {MIN_RATE // 1000} KB/s for {SLOW_WINDOW} s): "
+                                "check the connection, then run the same command again to resume"
+                            )
+                        window_start, window_bytes = now, 0
             if have == size and response.read(1):
                 part.unlink(missing_ok=True)
                 raise ServerError(f"{url} sent more data than the indexed size ({size} bytes)")
