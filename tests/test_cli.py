@@ -62,7 +62,7 @@ def test_fetch_runtime_extracts_and_removes_archive(bucket, monkeypatch, tmp_pat
 def test_fetch_toolchain_verifies_and_hints_docker(bucket, tmp_path, capsys):
     out = tmp_path / "out"
     assert run(bucket[1], "fetch", "toolchain", "cpu", "-o", str(out)) == 0
-    assert (out / "tool.tar").stat().st_size == 12000
+    assert (out / "tool-2.0.0.tar").stat().st_size == 12000
     assert "docker load -i" in capsys.readouterr().out
     assert run(bucket[1], "fetch", "toolchain", "cpu", "-o", str(out)) == 0
     assert "already downloaded" in capsys.readouterr().out
@@ -93,7 +93,16 @@ def test_variant_selects(bucket, monkeypatch, tmp_path):
 def test_unsupported_platform_explains(bucket, monkeypatch, capsys):
     host(monkeypatch, "macos", "aarch64")
     assert run(bucket[1], "fetch", "runtime", "cpu") == 1
-    assert "no cpu runtime for macos-aarch64" in capsys.readouterr().err
+    err = capsys.readouterr().err
+    assert "no cpu runtime for macos-aarch64" in err and "Available for cpu: linux-x86_64" in err and "--os/--arch" in err
+
+
+def test_unwritable_output_says_what_to_check(bucket, tmp_path, monkeypatch, capsys):
+    host(monkeypatch)
+    blocker = tmp_path / "file"
+    blocker.write_text("x")  # a file where the output directory should be
+    assert run(bucket[1], "fetch", "runtime", "cpu", "-o", str(blocker / "sub")) == 1
+    assert "check that the output directory" in capsys.readouterr().err
 
 
 def test_os_arch_override(bucket, monkeypatch, tmp_path):
@@ -112,7 +121,7 @@ def test_existing_runtime_dir_is_left_alone(bucket, monkeypatch, tmp_path, capsy
     assert run(bucket[1], *args) == 0
     capsys.readouterr()
     assert run(bucket[1], *args) == 0
-    assert "already fetched and verified" in capsys.readouterr().out
+    assert "already fetched" in capsys.readouterr().out
 
 
 def test_resume_continues_partial_download(bucket, tmp_path):
@@ -120,9 +129,9 @@ def test_resume_continues_partial_download(bucket, tmp_path):
     data = (root / "tc/tool.tar").read_bytes()
     out = tmp_path / "o"
     out.mkdir()
-    (out / "tool.tar.part").write_bytes(data[:5000])
+    (out / "tool-2.0.0.tar.part").write_bytes(data[:5000])
     assert run(index, "fetch", "toolchain", "cpu", "-o", str(out)) == 0
-    assert (out / "tool.tar").read_bytes() == data
+    assert (out / "tool-2.0.0.tar").read_bytes() == data
 
 
 def test_server_down_is_a_clean_error(bucket, monkeypatch, tmp_path, capsys):
@@ -199,6 +208,27 @@ def test_zipapp_runs_with_its_packaged_index_and_keeps_exit_codes(tmp_path):
     assert bad.returncode == 1 and "error:" in bad.stderr
 
 
+def test_pyz_bytes_do_not_depend_on_time_zone_mtimes_or_umask(tmp_path, monkeypatch):
+    """A maintainer rebuilding a release anywhere must get the CI's bytes: only SOURCE_DATE_EPOCH may matter."""
+    import hashlib
+    import os
+    import sys as _sys
+    import zipfile
+    from pathlib import Path
+    _sys.path.insert(0, str(Path(cli.__file__).parents[2] / "tools"))
+    import build_pyz
+    monkeypatch.setenv("SOURCE_DATE_EPOCH", "1761566762")
+    first = build_pyz.build(tmp_path / "a.pyz").read_bytes()
+    if hasattr(os, "tzset"):
+        monkeypatch.setenv("TZ", "Pacific/Auckland")
+        os.tzset()
+    os.utime(build_pyz.PACKAGE / "cli.py", (1, 1))  # same content, different mtime
+    second = build_pyz.build(tmp_path / "b.pyz").read_bytes()
+    os.utime(build_pyz.PACKAGE / "cli.py", None)
+    assert hashlib.sha256(first).digest() == hashlib.sha256(second).digest()
+    assert {i.date_time for i in zipfile.ZipFile(tmp_path / "a.pyz").infolist()} == {(2025, 10, 27, 12, 6, 2)}
+
+
 # ---- bounded downloads (adversary F2) ----
 
 def raw_server(handler_body):
@@ -250,6 +280,32 @@ def test_endless_body_is_cut_at_the_indexed_size(tmp_path, monkeypatch, capsys):
     assert code == 1 and "more data than the indexed size" in capsys.readouterr().err
     assert not [p for p in out.glob("*") if not p.name.endswith(".lock")], "no .part or file may stay"
     assert len(sent) < 100  # and it was not retried or drained to the end
+
+
+def test_slow_loris_server_is_cut_off_with_a_clear_error(tmp_path, monkeypatch, capsys):
+    """One byte every 0.2 s never trips the 60 s socket timeout: the throughput guard must."""
+    import time
+    from oaax_manager import download
+    real_sleep = time.sleep  # monkeypatching download.time.sleep patches the shared time module
+    monkeypatch.setattr(download.time, "sleep", lambda s: None)
+    monkeypatch.setattr(download, "SLOW_WINDOW", 1)  # 1 s window at >= 10 KB/s; the server gives ~5 B/s
+
+    def dribble(w):
+        for _ in range(100):
+            w.write(b"x")
+            w.flush()
+            real_sleep(0.2)
+
+    httpd = raw_server(dribble)
+    started = time.monotonic()
+    try:
+        out = tmp_path / "o"
+        code = run(index_for(tmp_path, f"http://127.0.0.1:{httpd.server_address[1]}", 1_000_000), "fetch", "toolchain", "cpu", "-o", str(out))
+    finally:
+        httpd.shutdown()
+    err = capsys.readouterr().err
+    assert code == 1 and "too slow" in err and "run the same command again to resume" in err
+    assert time.monotonic() - started < 15  # 3 attempts of ~1 s, not 100 x 0.2 s x retries
 
 
 def test_announced_length_above_index_is_refused_before_writing(bucket, tmp_path, capsys):

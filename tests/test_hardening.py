@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import http.server
 import json
 import os
 import sys
 import tarfile
+import threading
 
 import pytest
 
@@ -67,7 +69,7 @@ def test_unwritable_output_parent(bucket, tmp_path, capsys):
 
 
 def test_toolchain_destination_is_a_directory(bucket, tmp_path, capsys):
-    (tmp_path / "o" / "tool.tar").mkdir(parents=True)
+    (tmp_path / "o" / "tool-2.0.0.tar").mkdir(parents=True)
     assert run(bucket[1], "fetch", "toolchain", "cpu", "-o", str(tmp_path / "o")) == 1
     assert "is a directory" in capsys.readouterr().err
 
@@ -75,7 +77,7 @@ def test_toolchain_destination_is_a_directory(bucket, tmp_path, capsys):
 # F6: a second fetch of the same target is refused, the lock is released afterwards
 def test_concurrent_fetch_is_refused(bucket, tmp_path, capsys):
     out = tmp_path / "o"
-    with fetch_lock(out / "tool.tar"):
+    with fetch_lock(out / "tool-2.0.0.tar"):
         assert run(bucket[1], "fetch", "toolchain", "cpu", "-o", str(out)) == 1
         assert "another oaax-manager is already fetching" in capsys.readouterr().err
     assert run(bucket[1], "fetch", "toolchain", "cpu", "-o", str(out)) == 0
@@ -111,9 +113,9 @@ def test_failed_extraction_removes_the_verified_archive(server, make_index, tmp_
 def test_stale_part_is_retried_from_zero(bucket, tmp_path, stale):
     out = tmp_path / "o"
     out.mkdir()
-    (out / "tool.tar.part").write_bytes(stale)
+    (out / "tool-2.0.0.tar.part").write_bytes(stale)
     assert run(bucket[1], "fetch", "toolchain", "cpu", "-o", str(out)) == 0
-    assert (out / "tool.tar").read_bytes() == b"docker-image" * 1000
+    assert (out / "tool-2.0.0.tar").read_bytes() == b"docker-image" * 1000
 
 
 def test_resume_response_for_another_offset_is_not_trusted(bucket, tmp_path, monkeypatch):
@@ -121,9 +123,9 @@ def test_resume_response_for_another_offset_is_not_trusted(bucket, tmp_path, mon
     monkeypatch.setattr(download, "_resumes_at", lambda r, have: False)  # server "answers for another offset"
     out = tmp_path / "o"
     out.mkdir()
-    (out / "tool.tar.part").write_bytes(b"docker-image" * 400)
+    (out / "tool-2.0.0.tar.part").write_bytes(b"docker-image" * 400)
     assert run(bucket[1], "fetch", "toolchain", "cpu", "-o", str(out)) == 0
-    assert (out / "tool.tar").read_bytes() == b"docker-image" * 1000
+    assert (out / "tool-2.0.0.tar").read_bytes() == b"docker-image" * 1000
     assert real  # the real check is exercised by test_resume_continues_partial_download
 
 
@@ -169,7 +171,7 @@ def test_marker_of_another_build_is_refused_marker_of_this_build_is_accepted(buc
     assert run(bucket[1], "fetch", "runtime", "cpu", "-o", str(out)) == 0
     capsys.readouterr()
     assert run(bucket[1], "fetch", "runtime", "cpu", "-o", str(out)) == 0
-    assert "already fetched and verified" in capsys.readouterr().out
+    assert "already fetched" in capsys.readouterr().out
     marker = out / "runtime-cpu-2.0.0-linux-x86_64" / ".oaax-manager.json"
     marker.write_text(json.dumps({"archive_sha256": "0" * 64}))
     assert run(bucket[1], "fetch", "runtime", "cpu", "-o", str(out)) == 1
@@ -332,7 +334,7 @@ def test_docker_load_hint_is_quoted(bucket, tmp_path, capsys):
     assert run(bucket[1], "fetch", "toolchain", "cpu", "-o", str(out)) == 0
     hint = [l for l in capsys.readouterr().out.splitlines() if "docker load" in l][0]
     import shlex
-    assert shlex.split(hint.split("docker load -i ", 1)[1].split("\n")[0])[0] == str(out / "tool.tar")
+    assert shlex.split(hint.split("docker load -i ", 1)[1].split("\n")[0])[0] == str(out / "tool-2.0.0.tar")
 
 
 def test_small_files_do_not_report_zero_megabytes(bucket, tmp_path, capsys):
@@ -493,3 +495,330 @@ def test_directory_and_file_modes(tmp_path):
     mode = lambda n: (tmp_path / "d" / n).stat().st_mode & 0o7777  # noqa: E731
     assert [mode(n) for n in ("d700", "d777", "d750")] == [0o755] * 3
     assert [mode(n) for n in ("d700/f600", "d777/f100", "d750/f444")] == [0o644, 0o755, 0o644]
+
+
+# adversary round A3: "already fetched" must mean the bytes on disk are still the extracted ones, not that a marker file exists
+@pytest.fixture
+def fetched(bucket, tmp_path):
+    out = tmp_path / "o"
+    assert run(bucket[1], "fetch", "runtime", "cpu", "-o", str(out)) == 0
+    return bucket[1], out / "runtime-cpu-2.0.0-linux-x86_64"
+
+
+def test_a_rerun_re_checks_the_files_and_prints_the_library_again(fetched, tmp_path, capsys):
+    index, dest = fetched
+    capsys.readouterr()
+    assert run(index, "fetch", "runtime", "cpu", "-o", str(dest.parent)) == 0
+    out = capsys.readouterr().out
+    assert "already fetched" in out and "2 files still match" in out and f"Runtime library: {dest / 'libRuntimeLibrary.so'}" in out
+
+
+@pytest.mark.parametrize("damage", ["delete", "append", "same_size_other_bytes", "replace_by_link", "replace_by_dir"])
+def test_a_damaged_runtime_directory_is_never_reported_as_verified(fetched, capsys, damage):
+    index, dest = fetched
+    lib = dest / "libRuntimeLibrary.so"
+    if damage == "delete":
+        lib.unlink()
+    elif damage == "append":
+        lib.write_bytes(lib.read_bytes() + b"x")
+    elif damage == "same_size_other_bytes":
+        lib.write_bytes(b"XX")
+    elif damage == "replace_by_link":
+        lib.unlink()
+        lib.symlink_to(dest / "dep.so")
+    else:
+        lib.unlink()
+        lib.mkdir()
+    capsys.readouterr()
+    assert run(index, "fetch", "runtime", "cpu", "-o", str(dest.parent)) == 1
+    captured = capsys.readouterr()
+    assert "already fetched" not in captured.out and "delete" in captured.err and "run again" in captured.err
+
+
+def test_a_marker_without_the_file_list_is_not_trusted(fetched, capsys):
+    index, dest = fetched
+    marker = dest / ".oaax-manager.json"
+    sha = json.loads(marker.read_text())["archive_sha256"]
+    marker.write_text(json.dumps({"archive_sha256": sha}))  # what an earlier version wrote
+    assert run(index, "fetch", "runtime", "cpu", "-o", str(dest.parent)) == 1
+    assert "was not completed by this oaax-manager" in capsys.readouterr().err
+
+
+# adversary round A7: a symlink planted in a shared output directory must never be written through
+def test_a_symlinked_part_is_not_resumed_into(bucket, tmp_path, monkeypatch):
+    victim = tmp_path / "victim"
+    victim.write_text("PRECIOUS\n")
+    out = tmp_path / "o"
+    out.mkdir()
+    (out / "tool-2.0.0.tar.part").symlink_to(victim)
+    monkeypatch.setattr(cli, "host_platform", lambda: ("linux", "x86_64"))
+    assert run(bucket[1], "fetch", "toolchain", "cpu", "-o", str(out)) == 0
+    assert victim.read_text() == "PRECIOUS\n"
+    assert (out / "tool-2.0.0.tar").read_bytes() == b"docker-image" * 1000
+
+
+def test_the_part_is_opened_without_following_a_link(tmp_path):
+    """The check-then-open race: even if a link appears after the stale-part check, nothing is written through it."""
+    victim = tmp_path / "victim"
+    victim.write_text("PRECIOUS\n")
+    part = tmp_path / "x.part"
+    part.symlink_to(victim)
+    with pytest.raises(OSError):
+        download._open_part(part, append=True)
+    with pytest.raises(OSError):
+        download._open_part(part, append=False)
+    assert victim.read_text() == "PRECIOUS\n"
+
+
+@pytest.mark.parametrize("plant", ["dangling_link", "link_to_dir", "file"])
+def test_a_planted_extracting_entry_is_replaced_not_followed(bucket, tmp_path, monkeypatch, plant):
+    out = tmp_path / "o"
+    out.mkdir()
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    target = out / "runtime-cpu-2.0.0-linux-x86_64.extracting"
+    if plant == "dangling_link":
+        target.symlink_to(tmp_path / "nowhere")
+    elif plant == "link_to_dir":
+        target.symlink_to(elsewhere)
+    else:
+        target.write_text("junk")
+    monkeypatch.setattr(cli, "host_platform", lambda: ("linux", "x86_64"))
+    assert run(bucket[1], "fetch", "runtime", "cpu", "-o", str(out)) == 0
+    assert list(elsewhere.iterdir()) == []
+    assert (out / "runtime-cpu-2.0.0-linux-x86_64" / "libRuntimeLibrary.so").read_bytes() == b"so"
+
+
+# adversary round A2/A4: proxies and servers that cut a response in ways urllib does not turn into OSError
+import hashlib  # noqa: E402
+import http.client  # noqa: E402
+import http.server  # noqa: E402
+import socketserver  # noqa: E402
+import threading  # noqa: E402
+
+DATA = bytes(range(256)) * 1000  # 256 000 bytes
+
+
+class _Cutting(socketserver.StreamRequestHandler):
+    """First request: a chunked 200 that sends `cut` bytes and closes without the final chunk. Later requests: the whole file, honest."""
+
+    def handle(self):
+        request = self.rfile.readline()
+        headers = b""
+        while (line := self.rfile.readline()) not in (b"\r\n", b""):
+            headers += line
+        self.server.requests.append(headers.lower())
+        if self.server.cut is not None and (self.server.always or len(self.server.requests) == 1):
+            self.wfile.write(b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n")
+            body = DATA[: self.server.cut]
+            self.wfile.write(b"%x\r\n" % len(body) + body + b"\r\n")
+            return  # close: the chunked body never ends
+        if self.server.garbage:
+            self.wfile.write(b"GARBAGE\r\n\r\n")
+            return
+        self.wfile.write(b"HTTP/1.1 200 OK\r\nContent-Length: %d\r\nConnection: close\r\n\r\n" % len(DATA) + DATA)
+
+
+@pytest.fixture
+def cutting_server():
+    servers = []
+
+    def start(cut=None, garbage=False, always=False):
+        httpd = socketserver.ThreadingTCPServer(("127.0.0.1", 0), _Cutting)
+        httpd.requests, httpd.cut, httpd.garbage, httpd.always = [], cut, garbage, always
+        threading.Thread(target=httpd.serve_forever, daemon=True).start()
+        servers.append(httpd)
+        return httpd, f"http://127.0.0.1:{httpd.server_address[1]}/f"
+
+    yield start
+    for httpd in servers:
+        httpd.shutdown()
+        httpd.server_close()
+
+
+def test_a_response_cut_in_the_middle_is_a_clean_retryable_error_not_a_traceback(cutting_server, tmp_path, monkeypatch):
+    httpd, url = cutting_server(cut=100_000, always=True)
+    monkeypatch.setattr(download.time, "sleep", lambda s: None)
+    with pytest.raises(FetchError, match="run the same command again"):  # not http.client.IncompleteRead
+        download.download(url, tmp_path / "f", len(DATA), hashlib.sha256(DATA).hexdigest())
+    assert len(httpd.requests) >= 3  # retried (resume asks with Range, a server that ignores it makes the tool restart), then reported
+
+
+def test_a_cut_response_is_retried_and_ends_with_a_verified_file(cutting_server, tmp_path, monkeypatch):
+    httpd, url = cutting_server(cut=100_000)  # only the first response is cut
+    monkeypatch.setattr(download.time, "sleep", lambda s: None)
+    download.download(url, tmp_path / "f", len(DATA), hashlib.sha256(DATA).hexdigest())
+    assert (tmp_path / "f").read_bytes() == DATA
+    assert any(b"range: bytes=" in r for r in httpd.requests[1:])  # the retry resumed
+
+
+def test_garbage_instead_of_an_http_status_is_a_clean_error(cutting_server, tmp_path, monkeypatch):
+    httpd, url = cutting_server(garbage=True)
+    monkeypatch.setattr(download.time, "sleep", lambda s: None)
+    with pytest.raises(FetchError, match="run the same command again"):
+        download.download(url, tmp_path / "f", len(DATA), hashlib.sha256(DATA).hexdigest())
+    assert len(httpd.requests) == 3  # retried, then reported
+
+
+def test_a_complete_part_is_not_asked_for_again(tmp_path):
+    """A4: all bytes arrived but the end of the chunked body never did; the retry asked for `Range: bytes=<size>-`, got 416 and failed for good."""
+    part = tmp_path / "f.part"
+    part.write_bytes(DATA)
+    download._transfer_with_retries("http://127.0.0.1:9/never-contacted", part, len(DATA))  # would raise if it connected
+    assert part.read_bytes() == DATA
+
+
+def test_a_body_that_arrived_whole_succeeds_even_if_its_end_marker_never_does(cutting_server, tmp_path):
+    httpd, url = cutting_server(cut=len(DATA))
+    download.download(url, tmp_path / "f", len(DATA), hashlib.sha256(DATA).hexdigest())
+    assert (tmp_path / "f").read_bytes() == DATA
+    assert len(httpd.requests) == 1
+
+
+# adversary round A6/A8/A9: smaller defects
+def test_differences_compare_whole_entries_but_not_the_etag():
+    """A6: --check compared only sha256, so a vendor id or variant that regeneration would rename went unnoticed."""
+    a = dict(kind="runtime", vendor="nvidia-ort", version="2.0.0", os="linux", arch="x86_64", variant="cuda12", key="k", size=1, etag="e1", sha256="a" * 64)
+    assert gen_index.differences([a], [{**a, "etag": "e2"}]) == []
+    assert gen_index.differences([a], [{**a, "vendor": "nvidia-onnx"}]) == ["CHANGED: k (vendor)"]
+    assert gen_index.differences([a], [{**a, "variant": None, "size": 2}]) == ["CHANGED: k (size, variant)"]
+    assert gen_index.differences([a], []) == ["gone:    k"] and gen_index.differences([], [a]) == ["new:     k"]
+
+
+def test_gen_index_exits_2_when_it_could_not_check(tmp_path):
+    """A6: exit 1 means "the index differs"; a crash must not look like that."""
+    import subprocess
+
+    done = subprocess.run([sys.executable, os.path.join(os.path.dirname(__file__), "..", "tools", "gen_index.py"), "--check", "--listing", str(tmp_path / "missing")], capture_output=True, text=True)
+    assert done.returncode == 2 and "error:" in done.stderr
+
+
+def test_two_toolchain_versions_can_share_one_output_directory(server, make_index, tmp_path, monkeypatch):
+    """A8: the toolchain file was named after the key basename only, so fetching 2.1.0 replaced the verified 2.0.0 tar."""
+    root, _ = server
+    (root / "tc").mkdir()
+    (root / "tc/tool.tar").write_bytes(b"v2.0" * 100)
+    (root / "tc/tool21.tar").write_bytes(b"v2.1" * 100)
+    index = make_index([entry(root, "tc/tool.tar", kind="toolchain", os="any", arch="any"),
+                        entry(root, "tc/tool21.tar", kind="toolchain", os="any", arch="any", version="2.1.0")])
+    out = tmp_path / "o"
+    assert run(index, "fetch", "toolchain", "cpu", "--artifact-version", "2.0.0", "-o", str(out)) == 0
+    assert run(index, "fetch", "toolchain", "cpu", "--artifact-version", "2.1.0", "-o", str(out)) == 0
+    assert sorted(p.name for p in out.glob("*.tar")) == ["tool-2.0.0.tar", "tool21-2.1.0.tar"]
+    assert (out / "tool-2.0.0.tar").read_bytes() == b"v2.0" * 100
+
+
+def test_fetch_help_says_newest_for_this_platform(capsys):
+    with pytest.raises(SystemExit):
+        cli.main(["fetch", "--help"])
+    assert "newest version available for your platform" in " ".join(capsys.readouterr().out.split())
+
+
+# adversary round, second batch: variants, redirects, lock link, forged marker, unreadable file
+def _two_version_index(server, make_index, tmp_path, variants_new, variants_old):
+    root, _ = server
+    (root / "rt").mkdir(exist_ok=True)
+    entries = []
+    for version, variants in (("2.0.0", variants_old), ("2.1.0", variants_new)):
+        for variant in variants:
+            key = f"rt/h-{version}-{variant}.tar.gz"
+            make_tar(root / key, {"libRuntimeLibrary.so": f"{version}{variant}".encode()})
+            entries.append(entry(root, key, vendor="hailo", version=version, variant=variant))
+    return make_index(entries)
+
+
+def test_a_variant_error_lists_the_real_variants_for_the_platform(server, make_index, tmp_path, monkeypatch, capsys):
+    """A12a: the README's `--variant cuda12` example on another platform said only "no runtime with variant"."""
+    index = _two_version_index(server, make_index, tmp_path, ["hailort4.18.0", "hailort4.19.0"], ["hailort4.17.0"])
+    monkeypatch.setattr(cli, "host_platform", lambda: ("linux", "x86_64"))
+    assert run(index, "fetch", "runtime", "hailo", "--variant", "cuda99") == 1
+    err = capsys.readouterr().err
+    assert "variant 'cuda99' for linux-x86_64" in err and "hailort4.17.0, hailort4.18.0, hailort4.19.0" in err and "--os/--arch" in err
+
+
+def test_the_variant_is_filtered_before_the_newest_version_is_picked(server, make_index, tmp_path, monkeypatch, capsys):
+    """A12b: hailort4.17.0 exists only in 2.0.0; the newest version (2.1.0) lacks it, which used to read "no such variant"."""
+    index = _two_version_index(server, make_index, tmp_path, ["hailort4.18.0", "hailort4.19.0"], ["hailort4.17.0", "hailort4.18.0"])
+    monkeypatch.setattr(cli, "host_platform", lambda: ("linux", "x86_64"))
+    out = tmp_path / "o"
+    assert run(index, "fetch", "runtime", "hailo", "--variant", "hailort4.17.0", "-o", str(out)) == 0
+    assert (out / "runtime-hailo-2.0.0-linux-x86_64-hailort4.17.0" / "libRuntimeLibrary.so").exists()
+    assert run(index, "fetch", "runtime", "hailo", "--variant", "hailort4.18.0", "-o", str(out)) == 0  # in both: the newest wins
+    assert (out / "runtime-hailo-2.1.0-linux-x86_64-hailort4.18.0").is_dir()
+
+
+def test_a_vendor_that_exists_only_as_the_other_kind_says_so(server, make_index, capsys):
+    root, _ = server
+    (root / "tc").mkdir()
+    (root / "tc/t.tar").write_bytes(b"x" * 100)
+    index = make_index([entry(root, "tc/t.tar", kind="toolchain", os="any", arch="any")])
+    assert run(index, "fetch", "runtime", "cpu") == 1
+    err = capsys.readouterr().err
+    assert "oaax-manager fetch toolchain cpu" in err and "Available: \n" not in err and "Available: ," not in err
+
+
+class _Redirect(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(302)
+        self.send_header("Location", self.server.target)
+        self.end_headers()
+
+    log_message = lambda *a: None  # noqa: E731
+
+
+@pytest.mark.parametrize("target", ["ftp://127.0.0.1:2121/x", "http://203.0.113.9/x"])
+def test_a_redirect_to_anything_but_https_is_refused(tmp_path, target):
+    """A11: urllib followed redirects to ftp:// and http://, so "base_url must be https" was bypassable by any redirect."""
+    httpd = http.server.HTTPServer(("127.0.0.1", 0), _Redirect)
+    httpd.target = target
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    try:
+        with pytest.raises(download.ServerError, match="only https is allowed"):
+            download.download(f"http://127.0.0.1:{httpd.server_address[1]}/f", tmp_path / "f", 10, "0" * 64)
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
+
+
+def test_a_redirect_to_a_file_url_is_refused_too(tmp_path, monkeypatch):
+    monkeypatch.setattr(download.time, "sleep", lambda s: None)
+    httpd = http.server.HTTPServer(("127.0.0.1", 0), _Redirect)
+    httpd.target = "file:///etc/hostname"
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    try:
+        with pytest.raises(FetchError, match="not allowed"):  # urllib itself refuses this scheme
+            download.download(f"http://127.0.0.1:{httpd.server_address[1]}/f", tmp_path / "f", 10, "0" * 64)
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
+
+
+def test_a_dangling_lock_link_does_not_create_a_file_elsewhere(tmp_path):
+    target = tmp_path / "elsewhere" / "created"
+    (tmp_path / "elsewhere").mkdir()
+    (tmp_path / ".x.lock").symlink_to(target)
+    with pytest.raises(FetchError, match="lock file"):
+        with fetch_lock(tmp_path / "x"):
+            pass
+    assert not target.exists()
+
+
+def test_a_forged_marker_without_files_is_not_trusted(fetched, capsys):
+    index, dest = fetched
+    marker = dest / ".oaax-manager.json"
+    sha = json.loads(marker.read_text())["archive_sha256"]
+    marker.write_text(json.dumps({"archive_sha256": sha, "files": {}, "links": {}}))
+    assert run(index, "fetch", "runtime", "cpu", "-o", str(dest.parent)) == 1
+    assert "was not completed" in capsys.readouterr().err
+
+
+@pytest.mark.skipif(sys.platform == "win32" or os.geteuid() == 0, reason="needs POSIX permissions and a non-root user")
+def test_an_unreadable_extracted_file_says_which_one_and_what_to_do(fetched, capsys):
+    index, dest = fetched
+    (dest / "dep.so").chmod(0)
+    try:
+        assert run(index, "fetch", "runtime", "cpu", "-o", str(dest.parent)) == 1
+    finally:
+        (dest / "dep.so").chmod(0o644)
+    err = capsys.readouterr().err
+    assert "cannot read" in err and "dep.so" in err and "permissions" in err and "output directory" not in err

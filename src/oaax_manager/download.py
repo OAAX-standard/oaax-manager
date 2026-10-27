@@ -5,6 +5,7 @@ from __future__ import annotations
 import contextlib
 import errno
 import hashlib
+import http.client
 import json
 import os
 import re
@@ -15,10 +16,14 @@ import tarfile
 import time
 import unicodedata
 import urllib.error
+import urllib.parse
 import urllib.request
 from pathlib import Path, PurePosixPath, PureWindowsPath
 
 CHUNK = 1 << 20
+# Slow-loris guard: `timeout=60` only limits silence, a server sending one byte a minute never trips it.
+SLOW_WINDOW = 60  # seconds; in every window at least MIN_RATE bytes/s must arrive on average
+MIN_RATE = 10_000
 
 
 class FetchError(Exception):
@@ -68,7 +73,12 @@ def fetch_lock(target: Path):
     """Refuse to run twice for the same target: an advisory lock on `.<target>.lock` (flock / msvcrt, no stale locks)."""
     target.parent.mkdir(parents=True, exist_ok=True)
     path = target.with_name(f".{target.name}.lock")
-    handle = open(path, "a+b")
+    try:  # never follow a link planted at the lock path: it would create or touch a file somewhere else
+        if path.is_symlink():  # Windows has no O_NOFOLLOW
+            raise OSError(errno.ELOOP, "is a symbolic link")
+        handle = os.fdopen(os.open(path, os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_BINARY", 0), 0o644), "a+b")
+    except OSError as exc:
+        raise FetchError(f"cannot use the lock file {path}: {exc.strerror} (a link there? delete it and run again)") from exc
     try:
         try:
             if sys.platform == "win32":
@@ -92,6 +102,8 @@ def download(url: str, dest: Path, size: int, sha256: str) -> None:
     """
     part = dest.with_name(dest.name + ".part")
     part.parent.mkdir(parents=True, exist_ok=True)
+    if part.is_symlink():  # someone else's file in a shared directory: never resume into whatever it points to
+        part.unlink()
     for attempt in (1, 2):
         have = part.stat().st_size if part.exists() else 0
         resumed = 0 < have <= size
@@ -113,11 +125,43 @@ def download(url: str, dest: Path, size: int, sha256: str) -> None:
     )
 
 
+class _HttpsOnlyRedirects(urllib.request.HTTPRedirectHandler):
+    """The index only allows https (http for localhost); a redirect must not lead anywhere else (http://, ftp://, file://)."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        parsed = urllib.parse.urlparse(newurl)
+        if parsed.scheme != "https" and not (parsed.scheme == "http" and parsed.hostname in ("127.0.0.1", "localhost")):
+            raise ServerError(f"{req.full_url} redirects to {newurl}: only https is allowed")
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+urllib.request.install_opener(urllib.request.build_opener(_HttpsOnlyRedirects))  # this is a CLI process: every urlopen below uses it
+
+
+def _more_data(response) -> bool:
+    """Does the server send more than the indexed size? A connection that fails while we only ask is not evidence: the sha256 decides."""
+    try:
+        return bool(response.read(1))
+    except (OSError, http.client.HTTPException):
+        return False
+
+
+def _open_part(part: Path, append: bool):
+    """Open the .part for writing without following a symlink planted there."""
+    if part.is_symlink():  # Windows has no O_NOFOLLOW; the flag below covers the race on POSIX
+        raise OSError(errno.ELOOP, "refusing to write through a symbolic link", str(part))
+    flags = os.O_WRONLY | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_BINARY", 0) | (os.O_APPEND if append else os.O_TRUNC)
+    return os.fdopen(os.open(part, flags, 0o644), "ab" if append else "wb")
+
+
 def _transfer_with_retries(url: str, part: Path, size: int, attempts: int = 3) -> None:
     """Retry transient failures; every attempt resumes from what is already in `part`."""
     for attempt in range(1, attempts + 1):
+        have = part.stat().st_size if part.exists() else 0
+        if have == size:  # every byte arrived, only the confirmation of the end failed: asking for Range bytes=size- would answer 416
+            return
         try:
-            return _transfer(url, part, part.stat().st_size if part.exists() else 0, size)
+            return _transfer(url, part, have, size)
         except ServerError:
             raise
         except FetchError:
@@ -152,15 +196,25 @@ def _transfer(url: str, part: Path, have: int, size: int) -> None:
             if announced is not None and announced.isdigit() and int(announced) > size - have:
                 part.unlink(missing_ok=True)
                 raise ServerError(f"{url} announces {announced} bytes but only {size - have} are expected")
-            with part.open("ab" if have else "wb") as out:
+            window_start, window_bytes = time.monotonic(), 0
+            with _open_part(part, append=bool(have)) as out:
                 while have < size:
-                    chunk = response.read(min(CHUNK, size - have))
+                    chunk = response.read1(min(CHUNK, size - have))  # read() would wait for the whole chunk
                     if not chunk:
                         break
                     out.write(chunk)
                     have += len(chunk)
+                    window_bytes += len(chunk)
                     _progress(have, size)
-            if have == size and response.read(1):
+                    now = time.monotonic()
+                    if now - window_start >= SLOW_WINDOW:
+                        if window_bytes < MIN_RATE * (now - window_start):
+                            raise FetchError(
+                                f"download of {url} is too slow (under {MIN_RATE // 1000} KB/s for {SLOW_WINDOW} s): "
+                                "check the connection, then run the same command again to resume"
+                            )
+                        window_start, window_bytes = now, 0
+            if have == size and _more_data(response):
                 part.unlink(missing_ok=True)
                 raise ServerError(f"{url} sent more data than the indexed size ({size} bytes)")
     except urllib.error.HTTPError as exc:
@@ -173,7 +227,9 @@ def _transfer(url: str, part: Path, have: int, size: int) -> None:
                 f"TLS certificate verification failed for {url}: {exc.reason}\n"
                 "On macOS with a python.org Python, run its 'Install Certificates.command'; otherwise check the system clock and proxy."
             ) from exc
-        raise FetchError(f"download failed for {url}: {exc.reason} (run the same command again to resume)") from exc
+        raise FetchError(f"download failed for {url}: {exc.reason} (check your network or proxy, then run the same command again to resume)") from exc
+    except http.client.HTTPException as exc:  # IncompleteRead, BadStatusLine...: a proxy or server cut the response; resumable
+        raise FetchError(f"download failed for {url}: {type(exc).__name__} (check your network or proxy, then run the same command again to resume)") from exc
     except OSError as exc:
         if exc.errno in PERMANENT_ERRNO:
             raise ServerError(f"cannot write {part}: {exc.strerror}") from exc
@@ -249,7 +305,9 @@ def safe_extract(archive: Path, dest: Path, sha256: str | None = None) -> list[s
     if dest.exists():
         raise FetchError(f"{dest} already exists")
     tmp = dest.with_name(dest.name + ".extracting")
-    if tmp.exists():
+    if tmp.is_symlink() or tmp.is_file():  # a planted link must not redirect the extraction: remove the link itself
+        tmp.unlink()
+    elif tmp.exists():
         shutil.rmtree(tmp)  # leftover of an interrupted run of this tool
     tmp.mkdir(parents=True)
     root = tmp.resolve()
@@ -266,7 +324,8 @@ def safe_extract(archive: Path, dest: Path, sha256: str | None = None) -> list[s
                 else:
                     tar.extract(member, root)
         _normalise_modes(root, members)
-        (root / MARKER).write_text(json.dumps({"archive_sha256": sha256}))  # proves "fully extracted from a verified archive"
+        # Proves "fully extracted from a verified archive", and records what was extracted so a rerun can check it still is.
+        (root / MARKER).write_text(json.dumps({"archive_sha256": sha256, **_manifest(root, members)}))
         replace_with_retry(tmp, dest)
     except Exception as exc:  # tarfile/zlib raise EOFError, KeyError, zlib.error, ... on broken archives
         shutil.rmtree(tmp, ignore_errors=True)
@@ -274,6 +333,48 @@ def safe_extract(archive: Path, dest: Path, sha256: str | None = None) -> list[s
             raise
         raise FetchError(f"cannot extract {archive.name}: {type(exc).__name__}: {exc}") from exc
     return sorted(m.name for m in members if m.isfile())
+
+
+def _manifest(root: Path, members: list[tarfile.TarInfo]) -> dict:
+    files, links = {}, {}
+    for member in members:
+        path = root / member.name
+        if path.is_symlink():
+            links[member.name] = os.readlink(path)
+        elif path.is_file():  # also hard links of the archive, which are plain files once extracted
+            files[member.name] = {"size": path.stat().st_size, "sha256": sha256_file(path)}
+    return {"files": files, "links": links}
+
+
+def verify_extracted(dest: Path, sha256: str) -> list[str] | None:
+    """The files of a runtime directory completed earlier by this tool, re-checked against what was extracted.
+
+    None: not completed by this tool for this archive. FetchError: completed, but a file is missing or was changed since.
+    """
+    try:
+        marker = json.loads((dest / MARKER).read_text())
+        files, links = marker["files"], marker["links"]
+        if marker["archive_sha256"] != sha256:
+            return None
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+    if not files:  # no archive of ours is empty: a marker listing no file was not written by an extraction
+        return None
+    for name, want in files.items():
+        path = dest / name
+        if path.is_symlink() or not path.is_file():
+            raise FetchError(f"{path} is missing or no longer a regular file; delete {dest} and run again")
+        try:
+            changed = path.stat().st_size != want["size"] or sha256_file(path) != want["sha256"]
+        except OSError as exc:
+            raise FetchError(f"cannot read {path}: {exc.strerror}; fix its permissions, or delete {dest} and run again") from exc
+        if changed:
+            raise FetchError(f"{path} was modified after it was extracted; delete {dest} and run again")
+    for name, target in links.items():
+        path = dest / name
+        if not path.is_symlink() or os.readlink(path) != target:
+            raise FetchError(f"{path} is missing or no longer the link it was; delete {dest} and run again")
+    return sorted(files)
 
 
 def check_disk_space(directory: Path, needed: int) -> None:

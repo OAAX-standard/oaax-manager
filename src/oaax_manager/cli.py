@@ -4,14 +4,13 @@ from __future__ import annotations
 
 import argparse
 import contextlib
-import json
 import shlex
 import subprocess
 import sys
 from pathlib import Path
 
 from . import __version__
-from .download import MARKER, FetchError, check_disk_space, download, fetch_lock, safe_extract, sha256_file
+from .download import FetchError, check_disk_space, download, fetch_lock, safe_extract, sha256_file, verify_extracted
 from .index import Artifact, IndexError_, host_platform, load_index, version_key
 
 
@@ -65,27 +64,39 @@ def resolve(args: argparse.Namespace, index: list[Artifact]) -> Artifact:
     candidates = [a for a in index if a.kind == args.kind and a.vendor == args.vendor]
     if not candidates:
         known = sorted({a.vendor for a in index if a.kind == args.kind})
-        raise UserError(f"no {args.kind} for vendor {args.vendor!r}. Available: {', '.join(known)}")
+        other = sorted({a.kind for a in index if a.vendor == args.vendor})
+        if other:
+            raise UserError(f"no {args.kind} for vendor {args.vendor!r}, but it has a {' and a '.join(other)}: oaax-manager fetch {other[0]} {args.vendor}")
+        raise UserError(f"no {args.kind} for vendor {args.vendor!r}. Available: {', '.join(known) or 'none in this index'}")
+    where = ""
     if args.kind == "runtime":
         host_os, host_arch = host_platform()
         want_os, want_arch = args.os or host_os, args.arch or host_arch
+        platforms = sorted({f"{a.os}-{a.arch}" for a in candidates})
         candidates = [a for a in candidates if a.os == want_os and a.arch == want_arch]
+        where = f" for {want_os}-{want_arch}"
         if not candidates:
             raise UserError(
-                f"no {args.vendor} runtime for {want_os}-{want_arch}. "
-                "See `oaax-manager list --kind runtime`, or pass --os/--arch to fetch a build for another machine."
+                f"no {args.vendor} runtime for {want_os}-{want_arch}. Available for {args.vendor}: {', '.join(platforms)}. "
+                "Pass --os/--arch to fetch a build for another machine."
             )
     if args.version:
         candidates = [a for a in candidates if a.version == args.version]
         if not candidates:
-            raise UserError(f"no {args.kind} {args.vendor} version {args.version} for this platform")
-    else:  # default: the newest version that exists for this platform
+            raise UserError(f"no {args.kind} {args.vendor} version {args.version}{where}")
+    if args.variant:  # before the newest-version pick: the newest version may not have the build you asked for
+        wanted = [a for a in candidates if a.variant == args.variant]
+        if not wanted:
+            have = sorted({a.variant for a in candidates if a.variant})
+            raise UserError(
+                f"no {args.vendor} {args.kind} with variant {args.variant!r}{where}. "
+                + (f"Variants available{where}: {', '.join(have)}." if have else "It has no variants: leave --variant out.")
+                + (" Pass --os/--arch to look at another platform." if args.kind == "runtime" else "")
+            )
+        candidates = wanted
+    if not args.version:  # default: the newest version that exists for this platform (and variant)
         newest = max(version_key(a.version) for a in candidates)
         candidates = [a for a in candidates if version_key(a.version) == newest]
-    if args.variant:
-        candidates = [a for a in candidates if a.variant == args.variant]
-        if not candidates:
-            raise UserError(f"no {args.vendor} {args.kind} with variant {args.variant!r}")
     if len(candidates) > 1:
         options = ", ".join(sorted(a.variant or "-" for a in candidates))
         raise UserError(f"several builds match; choose one with --variant ({options})")
@@ -104,8 +115,14 @@ def cmd_fetch(args: argparse.Namespace, index: list[Artifact]) -> int:
     return fetch_runtime(artifact, out)
 
 
+def toolchain_filename(a: Artifact) -> str:
+    """The version is part of the name, so fetching 2.1.0 into the same -o never replaces the verified 2.0.0 (nor shares its .part)."""
+    path = Path(a.filename)
+    return a.filename if a.version in a.filename else f"{path.stem}-{a.version}{path.suffix}"
+
+
 def fetch_toolchain(a: Artifact, out: Path, force: bool) -> int:
-    dest = out / a.filename
+    dest = out / toolchain_filename(a)
     if out.resolve() not in dest.resolve().parents:
         raise FetchError(f"refusing to write outside {out}")
     if dest.is_dir():
@@ -139,23 +156,25 @@ def fetch_runtime(a: Artifact, out: Path) -> int:
         finally:
             with contextlib.suppress(OSError):  # a locked archive must not turn a good extraction into an error
                 archive.unlink(missing_ok=True)  # verified, but useless once extracted or refused
-    libs = [f for f in files if Path(f).name in ("libRuntimeLibrary.so", "RuntimeLibrary.dll")]
     print(f"Verified and extracted {len(files)} files to {dest}")
-    for lib in libs:
-        print(f"Runtime library: {dest / lib}")
+    print_libraries(dest, files)
     return 0
 
 
 def report_existing(dest: Path, a: Artifact) -> int:
-    """An existing target counts as done only if this tool completed it for this exact build."""
-    try:
-        done = json.loads((dest / MARKER).read_text()).get("archive_sha256") == a.sha256
-    except (OSError, ValueError, AttributeError):
-        done = False
-    if not done:
+    """An existing target counts as done only if this tool completed it for this exact build and its files are still what was extracted."""
+    files = verify_extracted(dest, a.sha256)
+    if files is None:
         raise UserError(f"{dest} exists but was not completed by this oaax-manager for this build; delete it and run again")
-    print(f"{dest} is already fetched and verified (sha256 {a.sha256[:12]}...); delete it to fetch again")
+    print(f"{dest} is already fetched: its {len(files)} files still match the sha256 recorded when they were extracted from the verified archive ({a.sha256[:12]}...); delete it to fetch again")
+    print_libraries(dest, files)
     return 0
+
+
+def print_libraries(dest: Path, files: list[str]) -> None:
+    for lib in files:
+        if Path(lib).name in ("libRuntimeLibrary.so", "RuntimeLibrary.dll"):
+            print(f"Runtime library: {dest / lib}")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -172,7 +191,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_fetch = sub.add_parser("fetch", help="download and verify one artifact")
     p_fetch.add_argument("kind", choices=("runtime", "toolchain"))
     p_fetch.add_argument("vendor", help="see `oaax-manager list` (e.g. cpu, intel, nvidia-ort, nvidia-trt, hailo, deepx)")
-    p_fetch.add_argument("--artifact-version", dest="version", help="default: the newest in the index")
+    p_fetch.add_argument("--artifact-version", dest="version", help="default: the newest version available for your platform")
     p_fetch.add_argument("--variant", help="needed when several builds exist (e.g. cuda12)")
     p_fetch.add_argument("--os", choices=("linux", "windows", "macos"), help="runtimes only; default: this machine")
     p_fetch.add_argument("--arch", choices=("x86_64", "aarch64"), help="runtimes only; default: this machine")
@@ -193,7 +212,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"error: {exc}", file=sys.stderr)
         return 1
     except OSError as exc:  # unwritable or conflicting output path, disk errors
-        print(f"error: {exc}", file=sys.stderr)
+        print(f"error: {exc} (check that the output directory, -o, exists and is writable)", file=sys.stderr)
         return 1
     except KeyboardInterrupt:
         print("\ninterrupted (partial downloads are kept; run again to resume)", file=sys.stderr)
