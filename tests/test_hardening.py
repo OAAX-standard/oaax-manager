@@ -540,3 +540,48 @@ def test_a_marker_without_the_file_list_is_not_trusted(fetched, capsys):
     marker.write_text(json.dumps({"archive_sha256": sha}))  # what an earlier version wrote
     assert run(index, "fetch", "runtime", "cpu", "-o", str(dest.parent)) == 1
     assert "was not completed by this oaax-manager" in capsys.readouterr().err
+
+
+# adversary round A7: a symlink planted in a shared output directory must never be written through
+def test_a_symlinked_part_is_not_resumed_into(bucket, tmp_path, monkeypatch):
+    victim = tmp_path / "victim"
+    victim.write_text("PRECIOUS\n")
+    out = tmp_path / "o"
+    out.mkdir()
+    (out / "tool.tar.part").symlink_to(victim)
+    monkeypatch.setattr(cli, "host_platform", lambda: ("linux", "x86_64"))
+    assert run(bucket[1], "fetch", "toolchain", "cpu", "-o", str(out)) == 0
+    assert victim.read_text() == "PRECIOUS\n"
+    assert (out / "tool.tar").read_bytes() == b"docker-image" * 1000
+
+
+def test_the_part_is_opened_without_following_a_link(tmp_path):
+    """The check-then-open race: even if a link appears after the stale-part check, nothing is written through it."""
+    victim = tmp_path / "victim"
+    victim.write_text("PRECIOUS\n")
+    part = tmp_path / "x.part"
+    part.symlink_to(victim)
+    with pytest.raises(OSError):
+        download._open_part(part, append=True)
+    with pytest.raises(OSError):
+        download._open_part(part, append=False)
+    assert victim.read_text() == "PRECIOUS\n"
+
+
+@pytest.mark.parametrize("plant", ["dangling_link", "link_to_dir", "file"])
+def test_a_planted_extracting_entry_is_replaced_not_followed(bucket, tmp_path, monkeypatch, plant):
+    out = tmp_path / "o"
+    out.mkdir()
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    target = out / "runtime-cpu-2.0.0-linux-x86_64.extracting"
+    if plant == "dangling_link":
+        target.symlink_to(tmp_path / "nowhere")
+    elif plant == "link_to_dir":
+        target.symlink_to(elsewhere)
+    else:
+        target.write_text("junk")
+    monkeypatch.setattr(cli, "host_platform", lambda: ("linux", "x86_64"))
+    assert run(bucket[1], "fetch", "runtime", "cpu", "-o", str(out)) == 0
+    assert list(elsewhere.iterdir()) == []
+    assert (out / "runtime-cpu-2.0.0-linux-x86_64" / "libRuntimeLibrary.so").read_bytes() == b"so"

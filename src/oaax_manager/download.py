@@ -95,6 +95,8 @@ def download(url: str, dest: Path, size: int, sha256: str) -> None:
     """
     part = dest.with_name(dest.name + ".part")
     part.parent.mkdir(parents=True, exist_ok=True)
+    if part.is_symlink():  # someone else's file in a shared directory: never resume into whatever it points to
+        part.unlink()
     for attempt in (1, 2):
         have = part.stat().st_size if part.exists() else 0
         resumed = 0 < have <= size
@@ -114,6 +116,12 @@ def download(url: str, dest: Path, size: int, sha256: str) -> None:
         "The artifact changed upstream after this oaax-manager release (2.0.0 files are still re-uploaded on "
         "every vendor build): upgrade oaax-manager, or report it if it is already the latest."
     )
+
+
+def _open_part(part: Path, append: bool):
+    """Open the .part for writing without following a symlink planted there (O_NOFOLLOW; Windows has none, but plants there need admin)."""
+    flags = os.O_WRONLY | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_BINARY", 0) | (os.O_APPEND if append else os.O_TRUNC)
+    return os.fdopen(os.open(part, flags, 0o644), "ab" if append else "wb")
 
 
 def _transfer_with_retries(url: str, part: Path, size: int, attempts: int = 3) -> None:
@@ -156,7 +164,7 @@ def _transfer(url: str, part: Path, have: int, size: int) -> None:
                 part.unlink(missing_ok=True)
                 raise ServerError(f"{url} announces {announced} bytes but only {size - have} are expected")
             window_start, window_bytes = time.monotonic(), 0
-            with part.open("ab" if have else "wb") as out:
+            with _open_part(part, append=bool(have)) as out:
                 while have < size:
                     chunk = response.read1(min(CHUNK, size - have))  # read() would wait for the whole chunk
                     if not chunk:
@@ -262,7 +270,9 @@ def safe_extract(archive: Path, dest: Path, sha256: str | None = None) -> list[s
     if dest.exists():
         raise FetchError(f"{dest} already exists")
     tmp = dest.with_name(dest.name + ".extracting")
-    if tmp.exists():
+    if tmp.is_symlink() or tmp.is_file():  # a planted link must not redirect the extraction: remove the link itself
+        tmp.unlink()
+    elif tmp.exists():
         shutil.rmtree(tmp)  # leftover of an interrupted run of this tool
     tmp.mkdir(parents=True)
     root = tmp.resolve()
