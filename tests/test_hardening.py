@@ -585,3 +585,89 @@ def test_a_planted_extracting_entry_is_replaced_not_followed(bucket, tmp_path, m
     assert run(bucket[1], "fetch", "runtime", "cpu", "-o", str(out)) == 0
     assert list(elsewhere.iterdir()) == []
     assert (out / "runtime-cpu-2.0.0-linux-x86_64" / "libRuntimeLibrary.so").read_bytes() == b"so"
+
+
+# adversary round A2/A4: proxies and servers that cut a response in ways urllib does not turn into OSError
+import hashlib  # noqa: E402
+import http.client  # noqa: E402
+import http.server  # noqa: E402
+import socketserver  # noqa: E402
+import threading  # noqa: E402
+
+DATA = bytes(range(256)) * 1000  # 256 000 bytes
+
+
+class _Cutting(socketserver.StreamRequestHandler):
+    """First request: a chunked 200 that sends `cut` bytes and closes without the final chunk. Later requests: the whole file, honest."""
+
+    def handle(self):
+        request = self.rfile.readline()
+        headers = b""
+        while (line := self.rfile.readline()) not in (b"\r\n", b""):
+            headers += line
+        self.server.requests.append(headers.lower())
+        if self.server.cut is not None and (self.server.always or len(self.server.requests) == 1):
+            self.wfile.write(b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n")
+            body = DATA[: self.server.cut]
+            self.wfile.write(b"%x\r\n" % len(body) + body + b"\r\n")
+            return  # close: the chunked body never ends
+        if self.server.garbage:
+            self.wfile.write(b"GARBAGE\r\n\r\n")
+            return
+        self.wfile.write(b"HTTP/1.1 200 OK\r\nContent-Length: %d\r\nConnection: close\r\n\r\n" % len(DATA) + DATA)
+
+
+@pytest.fixture
+def cutting_server():
+    servers = []
+
+    def start(cut=None, garbage=False, always=False):
+        httpd = socketserver.ThreadingTCPServer(("127.0.0.1", 0), _Cutting)
+        httpd.requests, httpd.cut, httpd.garbage, httpd.always = [], cut, garbage, always
+        threading.Thread(target=httpd.serve_forever, daemon=True).start()
+        servers.append(httpd)
+        return httpd, f"http://127.0.0.1:{httpd.server_address[1]}/f"
+
+    yield start
+    for httpd in servers:
+        httpd.shutdown()
+        httpd.server_close()
+
+
+def test_a_response_cut_in_the_middle_is_a_clean_retryable_error_not_a_traceback(cutting_server, tmp_path, monkeypatch):
+    httpd, url = cutting_server(cut=100_000, always=True)
+    monkeypatch.setattr(download.time, "sleep", lambda s: None)
+    with pytest.raises(FetchError, match="run the same command again"):  # not http.client.IncompleteRead
+        download.download(url, tmp_path / "f", len(DATA), hashlib.sha256(DATA).hexdigest())
+    assert len(httpd.requests) >= 3  # retried (resume asks with Range, a server that ignores it makes the tool restart), then reported
+
+
+def test_a_cut_response_is_retried_and_ends_with_a_verified_file(cutting_server, tmp_path, monkeypatch):
+    httpd, url = cutting_server(cut=100_000)  # only the first response is cut
+    monkeypatch.setattr(download.time, "sleep", lambda s: None)
+    download.download(url, tmp_path / "f", len(DATA), hashlib.sha256(DATA).hexdigest())
+    assert (tmp_path / "f").read_bytes() == DATA
+    assert any(b"range: bytes=" in r for r in httpd.requests[1:])  # the retry resumed
+
+
+def test_garbage_instead_of_an_http_status_is_a_clean_error(cutting_server, tmp_path, monkeypatch):
+    httpd, url = cutting_server(garbage=True)
+    monkeypatch.setattr(download.time, "sleep", lambda s: None)
+    with pytest.raises(FetchError, match="run the same command again"):
+        download.download(url, tmp_path / "f", len(DATA), hashlib.sha256(DATA).hexdigest())
+    assert len(httpd.requests) == 3  # retried, then reported
+
+
+def test_a_complete_part_is_not_asked_for_again(tmp_path):
+    """A4: all bytes arrived but the end of the chunked body never did; the retry asked for `Range: bytes=<size>-`, got 416 and failed for good."""
+    part = tmp_path / "f.part"
+    part.write_bytes(DATA)
+    download._transfer_with_retries("http://127.0.0.1:9/never-contacted", part, len(DATA))  # would raise if it connected
+    assert part.read_bytes() == DATA
+
+
+def test_a_body_that_arrived_whole_succeeds_even_if_its_end_marker_never_does(cutting_server, tmp_path):
+    httpd, url = cutting_server(cut=len(DATA))
+    download.download(url, tmp_path / "f", len(DATA), hashlib.sha256(DATA).hexdigest())
+    assert (tmp_path / "f").read_bytes() == DATA
+    assert len(httpd.requests) == 1

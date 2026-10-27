@@ -5,6 +5,7 @@ from __future__ import annotations
 import contextlib
 import errno
 import hashlib
+import http.client
 import json
 import os
 import re
@@ -118,6 +119,14 @@ def download(url: str, dest: Path, size: int, sha256: str) -> None:
     )
 
 
+def _more_data(response) -> bool:
+    """Does the server send more than the indexed size? A connection that fails while we only ask is not evidence: the sha256 decides."""
+    try:
+        return bool(response.read(1))
+    except (OSError, http.client.HTTPException):
+        return False
+
+
 def _open_part(part: Path, append: bool):
     """Open the .part for writing without following a symlink planted there (O_NOFOLLOW; Windows has none, but plants there need admin)."""
     flags = os.O_WRONLY | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_BINARY", 0) | (os.O_APPEND if append else os.O_TRUNC)
@@ -127,8 +136,11 @@ def _open_part(part: Path, append: bool):
 def _transfer_with_retries(url: str, part: Path, size: int, attempts: int = 3) -> None:
     """Retry transient failures; every attempt resumes from what is already in `part`."""
     for attempt in range(1, attempts + 1):
+        have = part.stat().st_size if part.exists() else 0
+        if have == size:  # every byte arrived, only the confirmation of the end failed: asking for Range bytes=size- would answer 416
+            return
         try:
-            return _transfer(url, part, part.stat().st_size if part.exists() else 0, size)
+            return _transfer(url, part, have, size)
         except ServerError:
             raise
         except FetchError:
@@ -181,7 +193,7 @@ def _transfer(url: str, part: Path, have: int, size: int) -> None:
                                 "check the connection, then run the same command again to resume"
                             )
                         window_start, window_bytes = now, 0
-            if have == size and response.read(1):
+            if have == size and _more_data(response):
                 part.unlink(missing_ok=True)
                 raise ServerError(f"{url} sent more data than the indexed size ({size} bytes)")
     except urllib.error.HTTPError as exc:
@@ -195,6 +207,8 @@ def _transfer(url: str, part: Path, have: int, size: int) -> None:
                 "On macOS with a python.org Python, run its 'Install Certificates.command'; otherwise check the system clock and proxy."
             ) from exc
         raise FetchError(f"download failed for {url}: {exc.reason} (check your network or proxy, then run the same command again to resume)") from exc
+    except http.client.HTTPException as exc:  # IncompleteRead, BadStatusLine...: a proxy or server cut the response; resumable
+        raise FetchError(f"download failed for {url}: {type(exc).__name__} (check your network or proxy, then run the same command again to resume)") from exc
     except OSError as exc:
         if exc.errno in PERMANENT_ERRNO:
             raise ServerError(f"cannot write {part}: {exc.strerror}") from exc
