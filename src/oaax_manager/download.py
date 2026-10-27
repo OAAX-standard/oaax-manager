@@ -147,7 +147,7 @@ def _more_data(response) -> bool:
 
 
 def _open_part(part: Path, append: bool):
-    """Open the .part for writing without following a symlink planted there (O_NOFOLLOW; Windows has none, but plants there need admin)."""
+    """Open the .part for writing without following a symlink planted there."""
     if part.is_symlink():  # Windows has no O_NOFOLLOW; the flag below covers the race on POSIX
         raise OSError(errno.ELOOP, "refusing to write through a symbolic link", str(part))
     flags = os.O_WRONLY | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_BINARY", 0) | (os.O_APPEND if append else os.O_TRUNC)
