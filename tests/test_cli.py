@@ -97,7 +97,8 @@ def test_unsupported_platform_explains(bucket, monkeypatch, capsys):
     assert "no cpu runtime for macos-aarch64" in err and "Available for cpu: linux-x86_64" in err and "--os/--arch" in err
 
 
-def test_unwritable_output_says_what_to_check(bucket, tmp_path, capsys):
+def test_unwritable_output_says_what_to_check(bucket, tmp_path, monkeypatch, capsys):
+    host(monkeypatch)
     blocker = tmp_path / "file"
     blocker.write_text("x")  # a file where the output directory should be
     assert run(bucket[1], "fetch", "runtime", "cpu", "-o", str(blocker / "sub")) == 1
