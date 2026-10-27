@@ -1,0 +1,42 @@
+name: publish
+# Uploads the wheel of a GitHub Release to PyPI with trusted publishing (OpenID Connect: no token is stored anywhere).
+#   1. a tag vX.Y.Z: build.yml tests it and drafts the release (wheel, .pyz, SHA256SUMS).
+#   2. a maintainer reviews the draft and presses Publish: this workflow starts, waits for the reviewer of the `pypi` environment,
+#      then uploads THE SAME wheel whose sha256 is in the release notes (it is not rebuilt).
+# One-time setup, on PyPI (Account > Publishing > pending publisher): project oaax-manager, owner OAAX-standard, repository oaax-manager,
+# workflow publish.yml, environment pypi. On GitHub: the `pypi` environment (required reviewer, tags v* only).
+on:
+  release:
+    types: [published]
+
+permissions: {}
+
+jobs:
+  pypi:
+    if: github.repository == 'OAAX-standard/oaax-manager' && !github.event.release.prerelease
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/project/oaax-manager/
+    permissions:
+      contents: read    # download the release assets
+      id-token: write   # trusted publishing; nothing else gets this permission
+    steps:
+      - name: Take the wheel of this release and check it is the tagged one
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.event.release.tag_name }}
+        run: |
+          set -euo pipefail
+          mkdir release dist
+          gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --pattern '*.whl' --pattern SHA256SUMS --dir release
+          test "$(ls release/*.whl | wc -l)" = 1
+          wheel=$(basename release/*.whl)
+          # the file must be the one listed in the release's checksums, and its version must be the tag's
+          (cd release && grep -F "$wheel" SHA256SUMS | sha256sum -c -)
+          test "$(echo "$wheel" | cut -d- -f2)" = "${TAG#v}" || { echo "wheel $wheel does not match tag $TAG"; exit 1; }
+          cp "release/$wheel" dist/
+      - uses: pypa/gh-action-pypi-publish@7245906fb61fa33a13554f9d5fb856fe61758086 # v1.14.3
+        with:
+          packages-dir: dist

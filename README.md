@@ -3,7 +3,7 @@
 Command-line tool to list and fetch OAAX **2.0** runtimes and conversion toolchains from the OAAX artifact store.
 Pure Python (standard library only), works on Linux, Windows and macOS.
 
-> **Status: 0.1.0 is release-ready; the repository is private until the maintainers publish it.**
+> **Status: 0.1.0, the first release.**
 
 ## Install
 
@@ -11,22 +11,22 @@ Needs [uv](https://docs.astral.sh/uv/) (it also provides Python 3.9+ if you have
 
 | You want | Command |
 | -------- | ------- |
-| `oaax-manager` on your PATH, isolated | `uv tool install git+https://github.com/OAAX-standard/oaax-manager@v0.1.0` |
-| to run it once, installing nothing | `uvx --from git+https://github.com/OAAX-standard/oaax-manager@v0.1.0 oaax-manager list` |
+| `oaax-manager` on your PATH, isolated | `uv tool install oaax-manager` |
+| to run it once, installing nothing | `uvx oaax-manager list` |
+| a single file, any Python 3.9+, no uv | `python oaax-manager.pyz list` (from the [Release](https://github.com/OAAX-standard/oaax-manager/releases)) |
 | the wheel from the GitHub Release | `uv tool install ./oaax_manager-0.1.0-py3-none-any.whl` |
-| a single file, any Python 3.9+, no uv | `python oaax-manager.pyz list` (from the Release) |
-| to install from a clone | `uv tool install .` |
+| to install from a clone or a tag | `uv tool install .` or `uv tool install git+https://github.com/OAAX-standard/oaax-manager@v0.1.0` |
 
-- **Pin a version.** Always give the tag (`@v0.1.0`) or the file you downloaded; without `@vX.Y.Z` you get the latest `main`. The artifact index is part of the release, so the same version always fetches the same bytes.
-- **Upgrade** by installing the newer tag (`uv tool install --reinstall git+...@v0.2.0`) and reading [CHANGELOG.md](CHANGELOG.md).
-- **Verify a release asset**: `sha256sum -c SHA256SUMS` (the sums are also in the release notes). While the repository is private, git and release downloads need access to it.
+- **Pin a version** for anything you script: `uv tool install oaax-manager==0.1.0` (or the tag `@v0.1.0`; without it a git install gives you the latest `main`). The artifact index is part of the release, so the same version always fetches the same bytes.
+- **Upgrade** with `uv tool upgrade oaax-manager` and read the [CHANGELOG](https://github.com/OAAX-standard/oaax-manager/blob/main/CHANGELOG.md).
+- **Verify a release asset**: `sha256sum -c SHA256SUMS` (the sums are also in the release notes).
 
 ## Use
 
 | Command | What it does |
 | ------- | ------------ |
 | `oaax-manager list [--kind K] [--vendor V]` | everything available; `*` marks runtimes built for this OS/CPU (several variants may match) |
-| `oaax-manager fetch runtime <vendor>` | picks this machine's OS/arch, extracts to `./runtime-<vendor>-<version>-<os>-<arch>/` |
+| `oaax-manager fetch runtime <vendor>` | picks this machine's OS/arch, extracts to `./runtime-<vendor>-<version>-<os>-<arch>[-<variant>]/` (the hidden `.oaax-manager.json` inside records what was extracted) |
 | `oaax-manager fetch toolchain <vendor>` | saves `<name>-<version>.tar`; then `docker load -i <file>` |
 
 ```bash
@@ -53,12 +53,13 @@ Running the same command again **re-checks** its files against the sha256 and pe
   - absolute paths and `..` are refused;
   - links must be relative and point down, and nothing is written through an archive link;
   - names that collide on Windows/macOS (case or Unicode variants, `CON`, `aux.*`, trailing dots/spaces, `:` or `\`) are refused.
+- Exotic members (a hard link to a symbolic link) are extracted as the running Python's `tarfile` does, as a link or as a file; both are safe.
 - A future vendor archive that breaks the rules fails with a clear message instead of extracting something ambiguous. If a legitimate archive needs it, relax the rule deliberately in `src/oaax_manager/download.py`.
 
 **Resilient downloads**
 - Interrupted downloads resume (`*.part` file) and transient network errors are retried; run the same command again if it still fails.
 - A link slower than 10 KB/s (averaged over 60 s) is reported once, not retried: the `.part` is kept for the next run.
-- The `-o` directory, or a toolchain `.tar` in it, may be a link to another disk.
+- The `-o` directory may be a link to another disk. A toolchain `.tar` that is already downloaded and verified may be a link too; a link to anything else is replaced by the download, so point `-o` at the bigger disk instead.
 
 **No surprises**
 - It never picks between builds for you (CUDA version, HailoRT version): it lists the choices.
@@ -67,15 +68,15 @@ Running the same command again **re-checks** its files against the sha256 and pe
 
 ## Limits
 
-- **After `kill -9`:** if a run is killed between the download and the end of the extraction, the verified archive stays in the output directory and the next run downloads it again. Delete the leftover `runtime-*.tar.gz` yourself.
+- **Interrupted extraction** (Ctrl-C, `kill -9`): run the same command again. A leftover `<dir>.extracting` folder is removed, and the verified archive is reused without downloading it again. Only a kill right after the final rename can leave a `runtime-*.tar.gz` behind: delete it yourself.
 - **macOS:** no OAAX runtime is published for macOS yet, so `fetch runtime` says so. Toolchains are Docker images and work wherever Docker runs.
 - **Vendor SDKs** that are behind a login are not handled.
 
 ## More
 
-- [CONTRIBUTING.md](CONTRIBUTING.md): development, how the artifact index works, building and verifying release assets, releasing.
-- [CHANGELOG.md](CHANGELOG.md), [SECURITY.md](SECURITY.md).
+- [CONTRIBUTING.md](https://github.com/OAAX-standard/oaax-manager/blob/main/CONTRIBUTING.md): development, how the artifact index works, building and verifying release assets, releasing.
+- [CHANGELOG.md](https://github.com/OAAX-standard/oaax-manager/blob/main/CHANGELOG.md), [SECURITY.md](https://github.com/OAAX-standard/oaax-manager/blob/main/SECURITY.md).
 
 ## License
 
-Apache 2.0, see [LICENSE](LICENSE).
+Apache 2.0, see [LICENSE](https://github.com/OAAX-standard/oaax-manager/blob/main/LICENSE).

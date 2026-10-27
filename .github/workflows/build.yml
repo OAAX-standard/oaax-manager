@@ -1,6 +1,6 @@
 name: build
 # Builds the wheel and the single-file .pyz, checks them, and keeps them as workflow artifacts.
-# A tag vX.Y.Z also creates a DRAFT GitHub Release (a maintainer reviews and publishes it by hand). Nothing is published to PyPI.
+# A tag vX.Y.Z also creates a DRAFT GitHub Release (a maintainer reviews it and presses Publish; that triggers publish.yml, the only workflow that talks to PyPI).
 # "Run workflow" (workflow_dispatch) on any branch is the dry run: everything except the release job.
 on:
   push:
@@ -103,7 +103,7 @@ jobs:
         shell: bash
         run: |
           # "Re-run failed jobs" after a draft exists would create a second draft for the same tag (drafts are not found by `gh release view TAG`)
-          if gh release list --repo "$GITHUB_REPOSITORY" --json tagName --jq '.[].tagName' | grep -qx "$GITHUB_REF_NAME"; then
+          if gh release list --limit 1000 --repo "$GITHUB_REPOSITORY" --json tagName --jq '.[].tagName' | grep -qx "$GITHUB_REF_NAME"; then
             echo "a release (draft or published) for $GITHUB_REF_NAME already exists: edit or delete it, then re-run"; exit 1
           fi
           gh release create "$GITHUB_REF_NAME" dist/* --repo "$GITHUB_REPOSITORY" --draft --verify-tag \

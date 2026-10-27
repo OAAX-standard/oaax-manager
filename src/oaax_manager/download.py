@@ -92,7 +92,8 @@ def fetch_lock(target: Path):
             raise OSError(errno.ELOOP, "is a symbolic link")
         handle = os.fdopen(os.open(path, os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_BINARY", 0), 0o644), "a+b")
     except OSError as exc:
-        raise FetchError(f"cannot use the lock file {path}: {exc.strerror} (a link there? delete it and run again)") from exc
+        hint = "a link there? delete it and run again" if exc.errno == errno.ELOOP else "check that the output directory, -o, is writable"
+        raise FetchError(f"cannot use the lock file {path}: {exc.strerror} ({hint})") from exc
     try:
         try:
             _try_lock(handle)
@@ -107,7 +108,8 @@ def fetch_lock(target: Path):
 
 STALE_PIN = (
     "The artifact changed upstream after this oaax-manager release (2.0.0 files are still re-uploaded on "
-    "every vendor build): upgrade oaax-manager, or report it if it is already the latest."
+    "every vendor build): upgrade oaax-manager, or report it if it is already the latest. A proxy or captive portal that altered the download "
+    "gives the same error: try another network."
 )
 
 
@@ -352,8 +354,10 @@ def safe_extract(archive: Path, dest: Path, sha256: str | None = None) -> list[s
         # Proves "fully extracted from a verified archive", and records what was extracted so a rerun can check it still is.
         (root / MARKER).write_text(json.dumps({"archive_sha256": sha256, **manifest}))
         replace_with_retry(tmp, dest)
-    except Exception as exc:  # tarfile/zlib raise EOFError, KeyError, zlib.error, ... on broken archives
+    except BaseException as exc:  # tarfile/zlib raise EOFError, KeyError, zlib.error, ... on broken archives; Ctrl-C must not leave `.extracting` behind
         shutil.rmtree(tmp, ignore_errors=True)
+        if not isinstance(exc, Exception):  # KeyboardInterrupt, SystemExit: not a broken archive
+            raise
         if isinstance(exc, FetchError):
             raise
         raise FetchError(f"cannot extract {archive.name}: {type(exc).__name__}: {exc}") from exc

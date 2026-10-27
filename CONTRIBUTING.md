@@ -5,7 +5,7 @@ Please read the [general OAAX contributing guide](https://github.com/OAAX-standa
 ## How to contribute
 
 1. Open an issue to discuss the change.
-2. Fork (or, while the repository is private, branch), then commit with sign-off.
+2. Fork, then commit with sign-off.
 3. Open a pull request against `main`.
 
 Before a pull request: tests pass, a bug fix has a regression test, and `CHANGELOG.md` mentions anything users will notice.
@@ -37,7 +37,7 @@ The artifact bucket does not allow public listing, so the package ships `src/oaa
 CI (`.github/workflows/build.yml`) builds a reproducible wheel and `oaax-manager.pyz` on every push to `main` and every pull request:
 
 - uv, the build backend and every action are pinned; a second build must give identical bytes.
-- The files are kept for 30 days as workflow artifacts, with `SHA256SUMS`. Nothing is published to PyPI.
+- The files are kept for 30 days as workflow artifacts, with `SHA256SUMS`. A build never publishes: PyPI is reached only by `publish.yml`, below.
 - "Run workflow" on any branch is a dry run of everything except the release job.
 
 To check a release asset yourself, on a clean clone of the tag, then compare with `SHA256SUMS`:
@@ -57,4 +57,7 @@ uv run --no-project python tools/build_pyz.py
 4. Merge to `main`.
 5. `git tag vX.Y.Z && git push origin vX.Y.Z`.
 6. The workflow checks that the tag is a commit of `main` and equals the version, runs the tests on the tag, and creates a **draft** GitHub Release (wheel, `.pyz`, `SHA256SUMS`, changelog section, checksums).
-7. Review the draft and press Publish.
+7. Review the draft and press **Publish**: that triggers `.github/workflows/publish.yml`.
+8. `publish.yml` waits for the reviewer of the `pypi` GitHub environment, then uploads **the wheel of the release** (not a rebuild) to PyPI by trusted publishing (OpenID Connect: no token is stored). It first checks the wheel against the release's `SHA256SUMS` and the tag.
+
+One-time setup: a PyPI trusted publisher (project `oaax-manager`, owner `OAAX-standard`, repository `oaax-manager`, workflow `publish.yml`, environment `pypi`) and the `pypi` environment on GitHub (required reviewer; deployments only from tags `v*`).
