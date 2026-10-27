@@ -1069,3 +1069,16 @@ def test_b12_an_unknown_version_lists_the_versions_that_exist(server, make_index
     monkeypatch.setattr(cli, "host_platform", lambda: ("linux", "x86_64"))
     assert run(index, "fetch", "runtime", "hailo", "--artifact-version", "2.0") == 1
     assert "Versions available for linux-x86_64: 2.0.0, 2.1.0" in capsys.readouterr().err
+
+
+def test_every_yaml_file_under_dot_github_parses():
+    """A backtick at the start of a plain scalar made bug_report.yml invalid: GitHub then silently drops the issue form, and a workflow with
+    invalid YAML fails only when it is needed. Nothing else reads these files before a tag."""
+    import pathlib
+
+    import yaml
+
+    files = [p for ext in ("yml", "yaml") for p in (pathlib.Path(__file__).resolve().parent.parent / ".github").rglob(f"*.{ext}")]
+    assert len(files) >= 5
+    for path in files:
+        yaml.safe_load(path.read_text())

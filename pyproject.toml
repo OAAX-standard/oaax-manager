@@ -12,7 +12,7 @@ license = { text = "Apache-2.0" }
 dependencies = []
 
 [dependency-groups]
-dev = ["pytest"]
+dev = ["pytest", "pyyaml"]
 
 [project.scripts]
 oaax-manager = "oaax_manager.cli:main"
