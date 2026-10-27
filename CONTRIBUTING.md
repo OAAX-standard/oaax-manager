@@ -40,13 +40,15 @@ CI (`.github/workflows/build.yml`) builds a reproducible wheel and `oaax-manager
 - The files are kept for 30 days as workflow artifacts, with `SHA256SUMS`. A build never publishes: PyPI is reached only by `publish.yml`, below.
 - "Run workflow" on any branch is a dry run of everything except the release job.
 
-To check a release asset yourself, on a clean clone of the tag, then compare with `SHA256SUMS`:
+To check a release asset yourself, build the tag and compare with `SHA256SUMS`. Set the umask **before you clone**: the wheel keeps the file modes of the checkout, and a clone made under the common umask `002` gives a different (equally good) wheel.
 
 ```bash
-umask 022                        # the wheel keeps the file modes of the checkout, so the umask matters
+umask 022
+git clone --branch vX.Y.Z https://github.com/OAAX-standard/oaax-manager && cd oaax-manager
 export SOURCE_DATE_EPOCH=$(git log -1 --pretty=%ct)
 uv build --wheel
 uv run --no-project python tools/build_pyz.py
+sha256sum dist/* | diff - SHA256SUMS    # the files of the release, byte for byte
 ```
 
 ## Releasing (maintainers)
