@@ -64,6 +64,8 @@ message instead of installing something unverified. Immutable per-release artifa
 CI (`.github/workflows/build.yml`) builds a reproducible wheel and `oaax-manager.pyz` on every push to `main` and every pull request (uv, the build backend and every
 action are pinned; a second build must give identical bytes) and keeps them for 30 days as workflow artifacts with `SHA256SUMS`. Nothing is published to PyPI.
 "Run workflow" on any branch is a dry run of everything except the release job.
+To check a release asset yourself: `umask 022; export SOURCE_DATE_EPOCH=$(git log -1 --pretty=%ct); uv build --wheel; uv run --no-project python tools/build_pyz.py` on a clean clone of the tag
+(the wheel keeps the file modes of the checkout, so the umask matters), and compare with `SHA256SUMS`.
 
 To release (maintainers): set `__version__` in `src/oaax_manager/__init__.py`, give the `CHANGELOG.md` section its date, run `uv run tools/gen_index.py --check` (re-run without
 `--check` and merge the index first if it reports changes), merge to `main`, then `git tag vX.Y.Z && git push origin vX.Y.Z`. The workflow checks that the tag equals the version and

@@ -208,6 +208,27 @@ def test_zipapp_runs_with_its_packaged_index_and_keeps_exit_codes(tmp_path):
     assert bad.returncode == 1 and "error:" in bad.stderr
 
 
+def test_pyz_bytes_do_not_depend_on_time_zone_mtimes_or_umask(tmp_path, monkeypatch):
+    """A maintainer rebuilding a release anywhere must get the CI's bytes: only SOURCE_DATE_EPOCH may matter."""
+    import hashlib
+    import os
+    import sys as _sys
+    import zipfile
+    from pathlib import Path
+    _sys.path.insert(0, str(Path(cli.__file__).parents[2] / "tools"))
+    import build_pyz
+    monkeypatch.setenv("SOURCE_DATE_EPOCH", "1761566762")
+    first = build_pyz.build(tmp_path / "a.pyz").read_bytes()
+    if hasattr(os, "tzset"):
+        monkeypatch.setenv("TZ", "Pacific/Auckland")
+        os.tzset()
+    os.utime(build_pyz.PACKAGE / "cli.py", (1, 1))  # same content, different mtime
+    second = build_pyz.build(tmp_path / "b.pyz").read_bytes()
+    os.utime(build_pyz.PACKAGE / "cli.py", None)
+    assert hashlib.sha256(first).digest() == hashlib.sha256(second).digest()
+    assert {i.date_time for i in zipfile.ZipFile(tmp_path / "a.pyz").infolist()} == {(2025, 10, 27, 12, 6, 2)}
+
+
 # ---- bounded downloads (adversary F2) ----
 
 def raw_server(handler_body):

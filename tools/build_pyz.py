@@ -8,26 +8,31 @@
 from __future__ import annotations
 
 import os
-import shutil
 import sys
-import tempfile
-import zipapp
+import time
+import zipfile
 from pathlib import Path
 
 PACKAGE = Path(__file__).resolve().parent.parent / "src" / "oaax_manager"
+# zipapp would stamp local time, filesystem order and the umask into the archive: write it ourselves.
+MAIN = b"from oaax_manager.cli import run\n\nrun()\n"
 
 
 def build(output: Path) -> Path:
-    with tempfile.TemporaryDirectory() as tmp:
-        target = Path(tmp) / "oaax_manager"
-        shutil.copytree(PACKAGE, target, ignore=shutil.ignore_patterns("__pycache__", "*.partial.json"))
-        # zipapp's own `main=` stamps __main__.py with the current time, so write it ourselves
-        (Path(tmp) / "__main__.py").write_text("from oaax_manager.cli import run\n\nrun()\n")
-        if epoch := os.environ.get("SOURCE_DATE_EPOCH"):  # reproducible: same bytes for the same commit
-            for path in [Path(tmp), *Path(tmp).rglob("*")]:
-                os.utime(path, (int(epoch), int(epoch)))
-        zipapp.create_archive(tmp, output)
-    return output
+    """Deterministic zip: sorted entries, fixed mode, UTC timestamp from SOURCE_DATE_EPOCH, stored (no zlib-version dependence)."""
+    epoch = int(os.environ.get("SOURCE_DATE_EPOCH", time.time()))
+    stamp = time.gmtime(max(epoch, 315532800))[:6]  # zip cannot store dates before 1980
+    files = {"__main__.py": MAIN}
+    for path in sorted(PACKAGE.rglob("*")):
+        if path.is_file() and "__pycache__" not in path.parts and not path.name.endswith(".partial.json"):
+            files[f"oaax_manager/{path.relative_to(PACKAGE).as_posix()}"] = path.read_bytes()
+    with zipfile.ZipFile(output, "w", zipfile.ZIP_STORED) as archive:
+        for name in sorted(files):
+            info = zipfile.ZipInfo(name, stamp)
+            info.external_attr = 0o644 << 16
+            info.create_system = 3  # Unix, whatever OS builds it
+            archive.writestr(info, files[name])
+    return Path(output)
 
 
 if __name__ == "__main__":
