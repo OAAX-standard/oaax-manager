@@ -4,14 +4,13 @@ from __future__ import annotations
 
 import argparse
 import contextlib
-import json
 import shlex
 import subprocess
 import sys
 from pathlib import Path
 
 from . import __version__
-from .download import MARKER, FetchError, check_disk_space, download, fetch_lock, safe_extract, sha256_file
+from .download import FetchError, check_disk_space, download, fetch_lock, safe_extract, sha256_file, verify_extracted
 from .index import Artifact, IndexError_, host_platform, load_index, version_key
 
 
@@ -140,23 +139,25 @@ def fetch_runtime(a: Artifact, out: Path) -> int:
         finally:
             with contextlib.suppress(OSError):  # a locked archive must not turn a good extraction into an error
                 archive.unlink(missing_ok=True)  # verified, but useless once extracted or refused
-    libs = [f for f in files if Path(f).name in ("libRuntimeLibrary.so", "RuntimeLibrary.dll")]
     print(f"Verified and extracted {len(files)} files to {dest}")
-    for lib in libs:
-        print(f"Runtime library: {dest / lib}")
+    print_libraries(dest, files)
     return 0
 
 
 def report_existing(dest: Path, a: Artifact) -> int:
-    """An existing target counts as done only if this tool completed it for this exact build."""
-    try:
-        done = json.loads((dest / MARKER).read_text()).get("archive_sha256") == a.sha256
-    except (OSError, ValueError, AttributeError):
-        done = False
-    if not done:
+    """An existing target counts as done only if this tool completed it for this exact build and its files are still what was extracted."""
+    files = verify_extracted(dest, a.sha256)
+    if files is None:
         raise UserError(f"{dest} exists but was not completed by this oaax-manager for this build; delete it and run again")
-    print(f"{dest} is already fetched and verified (sha256 {a.sha256[:12]}...); delete it to fetch again")
+    print(f"{dest} is already fetched: its {len(files)} files still match the sha256 recorded when they were extracted from the verified archive ({a.sha256[:12]}...); delete it to fetch again")
+    print_libraries(dest, files)
     return 0
+
+
+def print_libraries(dest: Path, files: list[str]) -> None:
+    for lib in files:
+        if Path(lib).name in ("libRuntimeLibrary.so", "RuntimeLibrary.dll"):
+            print(f"Runtime library: {dest / lib}")
 
 
 def build_parser() -> argparse.ArgumentParser:

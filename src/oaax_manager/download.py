@@ -279,7 +279,8 @@ def safe_extract(archive: Path, dest: Path, sha256: str | None = None) -> list[s
                 else:
                     tar.extract(member, root)
         _normalise_modes(root, members)
-        (root / MARKER).write_text(json.dumps({"archive_sha256": sha256}))  # proves "fully extracted from a verified archive"
+        # Proves "fully extracted from a verified archive", and records what was extracted so a rerun can check it still is.
+        (root / MARKER).write_text(json.dumps({"archive_sha256": sha256, **_manifest(root, members)}))
         replace_with_retry(tmp, dest)
     except Exception as exc:  # tarfile/zlib raise EOFError, KeyError, zlib.error, ... on broken archives
         shutil.rmtree(tmp, ignore_errors=True)
@@ -287,6 +288,42 @@ def safe_extract(archive: Path, dest: Path, sha256: str | None = None) -> list[s
             raise
         raise FetchError(f"cannot extract {archive.name}: {type(exc).__name__}: {exc}") from exc
     return sorted(m.name for m in members if m.isfile())
+
+
+def _manifest(root: Path, members: list[tarfile.TarInfo]) -> dict:
+    files, links = {}, {}
+    for member in members:
+        path = root / member.name
+        if path.is_symlink():
+            links[member.name] = os.readlink(path)
+        elif path.is_file():  # also hard links of the archive, which are plain files once extracted
+            files[member.name] = {"size": path.stat().st_size, "sha256": sha256_file(path)}
+    return {"files": files, "links": links}
+
+
+def verify_extracted(dest: Path, sha256: str) -> list[str] | None:
+    """The files of a runtime directory completed earlier by this tool, re-checked against what was extracted.
+
+    None: not completed by this tool for this archive. FetchError: completed, but a file is missing or was changed since.
+    """
+    try:
+        marker = json.loads((dest / MARKER).read_text())
+        files, links = marker["files"], marker["links"]
+        if marker["archive_sha256"] != sha256:
+            return None
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+    for name, want in files.items():
+        path = dest / name
+        if path.is_symlink() or not path.is_file():
+            raise FetchError(f"{path} is missing or no longer a regular file; delete {dest} and run again")
+        if path.stat().st_size != want["size"] or sha256_file(path) != want["sha256"]:
+            raise FetchError(f"{path} was modified after it was extracted; delete {dest} and run again")
+    for name, target in links.items():
+        path = dest / name
+        if not path.is_symlink() or os.readlink(path) != target:
+            raise FetchError(f"{path} is missing or no longer the link it was; delete {dest} and run again")
+    return sorted(files)
 
 
 def check_disk_space(directory: Path, needed: int) -> None:

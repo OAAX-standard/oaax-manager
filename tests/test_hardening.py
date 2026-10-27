@@ -169,7 +169,7 @@ def test_marker_of_another_build_is_refused_marker_of_this_build_is_accepted(buc
     assert run(bucket[1], "fetch", "runtime", "cpu", "-o", str(out)) == 0
     capsys.readouterr()
     assert run(bucket[1], "fetch", "runtime", "cpu", "-o", str(out)) == 0
-    assert "already fetched and verified" in capsys.readouterr().out
+    assert "already fetched" in capsys.readouterr().out
     marker = out / "runtime-cpu-2.0.0-linux-x86_64" / ".oaax-manager.json"
     marker.write_text(json.dumps({"archive_sha256": "0" * 64}))
     assert run(bucket[1], "fetch", "runtime", "cpu", "-o", str(out)) == 1
@@ -493,3 +493,50 @@ def test_directory_and_file_modes(tmp_path):
     mode = lambda n: (tmp_path / "d" / n).stat().st_mode & 0o7777  # noqa: E731
     assert [mode(n) for n in ("d700", "d777", "d750")] == [0o755] * 3
     assert [mode(n) for n in ("d700/f600", "d777/f100", "d750/f444")] == [0o644, 0o755, 0o644]
+
+
+# adversary round A3: "already fetched" must mean the bytes on disk are still the extracted ones, not that a marker file exists
+@pytest.fixture
+def fetched(bucket, tmp_path):
+    out = tmp_path / "o"
+    assert run(bucket[1], "fetch", "runtime", "cpu", "-o", str(out)) == 0
+    return bucket[1], out / "runtime-cpu-2.0.0-linux-x86_64"
+
+
+def test_a_rerun_re_checks_the_files_and_prints_the_library_again(fetched, tmp_path, capsys):
+    index, dest = fetched
+    capsys.readouterr()
+    assert run(index, "fetch", "runtime", "cpu", "-o", str(dest.parent)) == 0
+    out = capsys.readouterr().out
+    assert "already fetched" in out and "2 files still match" in out and f"Runtime library: {dest / 'libRuntimeLibrary.so'}" in out
+
+
+@pytest.mark.parametrize("damage", ["delete", "append", "same_size_other_bytes", "replace_by_link", "replace_by_dir"])
+def test_a_damaged_runtime_directory_is_never_reported_as_verified(fetched, capsys, damage):
+    index, dest = fetched
+    lib = dest / "libRuntimeLibrary.so"
+    if damage == "delete":
+        lib.unlink()
+    elif damage == "append":
+        lib.write_bytes(lib.read_bytes() + b"x")
+    elif damage == "same_size_other_bytes":
+        lib.write_bytes(b"XX")
+    elif damage == "replace_by_link":
+        lib.unlink()
+        lib.symlink_to(dest / "dep.so")
+    else:
+        lib.unlink()
+        lib.mkdir()
+    capsys.readouterr()
+    assert run(index, "fetch", "runtime", "cpu", "-o", str(dest.parent)) == 1
+    captured = capsys.readouterr()
+    assert "already fetched" not in captured.out and "delete" in captured.err and "run again" in captured.err
+
+
+def test_a_marker_without_the_file_list_is_not_trusted(fetched, capsys):
+    index, dest = fetched
+    marker = dest / ".oaax-manager.json"
+    sha = json.loads(marker.read_text())["archive_sha256"]
+    marker.write_text(json.dumps({"archive_sha256": sha}))  # what an earlier version wrote
+    assert run(index, "fetch", "runtime", "cpu", "-o", str(dest.parent)) == 1
+    assert "was not completed by this oaax-manager" in capsys.readouterr().err
