@@ -3,18 +3,25 @@
 Command-line tool to list and fetch OAAX **2.0** runtimes and conversion toolchains from the OAAX artifact store.
 Pure Python (standard library only), works on Linux, Windows and macOS.
 
-**Status: early development, private until ready.**
+**Status: 0.1.0 is release-ready; the repository is private until the maintainers publish it.**
 
 ## Install
 
-Needs [uv](https://docs.astral.sh/uv/) (it also provides Python 3.9+ if you have none). No dependencies.
+Needs [uv](https://docs.astral.sh/uv/) (it also provides Python 3.9+ if you have none). No dependencies. Pick one:
 
 ```bash
-uv tool install git+https://github.com/OAAX-standard/oaax-manager    # puts `oaax-manager` on PATH, isolated (needs repo access while private)
-uvx --from git+https://github.com/OAAX-standard/oaax-manager oaax-manager list   # or run it once without installing
-uv tool install .                                                    # or from a clone
-uv run --no-project python tools/build_pyz.py                        # or one self-contained file: python oaax-manager.pyz list
+uv tool install git+https://github.com/OAAX-standard/oaax-manager@v0.1.0     # puts `oaax-manager` on PATH, isolated
+uvx --from git+https://github.com/OAAX-standard/oaax-manager@v0.1.0 oaax-manager list   # or run it once, nothing installed
+uv tool install ./oaax_manager-0.1.0-py3-none-any.whl                        # or the wheel from the GitHub Release
+python oaax-manager.pyz list                                                 # or the single-file .pyz from the Release (any Python 3.9+, no uv)
 ```
+
+Release assets are listed with their sha256 in the release notes (and in `SHA256SUMS`): `sha256sum -c SHA256SUMS`.
+While the repository is private, git and release downloads need access to it.
+
+**Pin a version.** Always give the tag (`@v0.1.0`) or the file you downloaded; without `@vX.Y.Z` you get the latest `main`. The artifact index is part of the
+release, so the same version always fetches the same bytes. To upgrade, install the newer tag (`uv tool install --reinstall git+...@v0.2.0`) and read `CHANGELOG.md`.
+From a clone: `uv tool install .`; build your own `.pyz`: `uv run --no-project python tools/build_pyz.py`.
 
 ## Use
 
@@ -54,8 +61,13 @@ message instead of installing something unverified. Immutable per-release artifa
 
 ## Builds and releases
 
-CI (`.github/workflows/build.yml`) builds a reproducible wheel and `oaax-manager.pyz` on every push to `main` and keeps them for 30 days as workflow
-artifacts (with `SHA256SUMS`). Pushing a tag `vX.Y.Z` (must equal `__version__`) also attaches them to a GitHub Release. Nothing is published to PyPI.
+CI (`.github/workflows/build.yml`) builds a reproducible wheel and `oaax-manager.pyz` on every push to `main` and every pull request (uv, the build backend and every
+action are pinned; a second build must give identical bytes) and keeps them for 30 days as workflow artifacts with `SHA256SUMS`. Nothing is published to PyPI.
+"Run workflow" on any branch is a dry run of everything except the release job.
+
+To release (maintainers): set `__version__` in `src/oaax_manager/__init__.py`, give the `CHANGELOG.md` section its date, run `uv run tools/gen_index.py --check` (re-run without
+`--check` and merge the index first if it reports changes), merge to `main`, then `git tag vX.Y.Z && git push origin vX.Y.Z`. The workflow checks that the tag equals the version and
+creates a **draft** GitHub Release (wheel, `.pyz`, `SHA256SUMS`, changelog section, checksums); review it and press Publish.
 
 ## Development
 

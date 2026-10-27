@@ -1,0 +1,7 @@
+# Actions are pinned to commit SHAs: dependabot proposes the new SHA (and its version comment) as a PR.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: monthly

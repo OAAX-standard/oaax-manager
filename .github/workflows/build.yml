@@ -1,11 +1,13 @@
 name: build
 # Builds the wheel and the single-file .pyz, checks them, and keeps them as workflow artifacts.
-# A tag vX.Y.Z also attaches them to a GitHub Release. Nothing is published to PyPI.
+# A tag vX.Y.Z also creates a DRAFT GitHub Release (a maintainer reviews and publishes it by hand). Nothing is published to PyPI.
+# "Run workflow" (workflow_dispatch) on any branch is the dry run: everything except the release job.
 on:
   push:
     branches: [main]
     tags: ["v*"]
   pull_request:
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -14,16 +16,29 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
       - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
         with:
           python-version: "3.12"
+          version: "0.10.9"  # pinned: part of the reproducible build
       - name: Build wheel and pyz (reproducible, timestamps fixed to the commit time)
         run: |
           export SOURCE_DATE_EPOCH=$(git log -1 --pretty=%ct)
           uv build --wheel --out-dir dist
           uv run --no-project python tools/build_pyz.py dist/oaax-manager.pyz
           (cd dist && sha256sum * > SHA256SUMS && cat SHA256SUMS)
+      - name: The build is reproducible (a second build from the same commit gives identical bytes)
+        run: |
+          export SOURCE_DATE_EPOCH=$(git log -1 --pretty=%ct)
+          uv build --wheel --out-dir dist2
+          uv run --no-project python tools/build_pyz.py dist2/oaax-manager.pyz
+          (cd dist2 && sha256sum -c ../dist/SHA256SUMS)
+      - name: Release notes (dry run on every build; fails if CHANGELOG.md lacks this version)
+        run: |
+          version=$(uv run --no-project python -c "import re,pathlib;print(re.search(r'__version__ = .(.+?).$', pathlib.Path('src/oaax_manager/__init__.py').read_text(), re.M)[1])")
+          uv run --no-project python tools/release_notes.py "$version" dist/SHA256SUMS | tee release-notes.md
       - name: The tag must match the package version
         if: startsWith(github.ref, 'refs/tags/v')
         run: |
@@ -38,11 +53,17 @@ jobs:
         run: |
           uv run --no-project python dist/oaax-manager.pyz list | head -5
           if uv run --no-project python dist/oaax-manager.pyz fetch runtime nosuch; then echo "expected a failure"; exit 1; fi
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: oaax-manager-${{ github.sha }}
           path: dist/*
           retention-days: 30
+          if-no-files-found: error
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: startsWith(github.ref, 'refs/tags/v')
+        with:
+          name: release-notes
+          path: release-notes.md
           if-no-files-found: error
 
   release:
@@ -52,13 +73,16 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: oaax-manager-${{ github.sha }}
           path: dist
-      - name: Create the GitHub Release
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: release-notes
+      - name: Create the DRAFT GitHub Release (publish it by hand after checking the assets)
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "$GITHUB_REF_NAME" dist/* --repo "$GITHUB_REPOSITORY" --title "$GITHUB_REF_NAME" \
-            --notes "Built by CI from commit $GITHUB_SHA. Verify downloads against SHA256SUMS."
+          gh release create "$GITHUB_REF_NAME" dist/* --repo "$GITHUB_REPOSITORY" --draft --verify-tag \
+            --title "$GITHUB_REF_NAME" --notes-file release-notes.md
