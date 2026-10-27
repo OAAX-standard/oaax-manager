@@ -56,3 +56,17 @@ def test_the_tool_exits_non_zero_and_prints_nothing_for_a_missing_section(tmp_pa
     sums.write_text("x")
     done = run_tool("9.9.9", sums, "--final")
     assert done.returncode != 0 and done.stdout == "" and "no '## [9.9.9]' section" in done.stderr
+
+
+def test_a_hash_heading_inside_a_code_fence_does_not_end_the_section():
+    """adversary A13c: the section was cut at a `## ` line inside a fenced block."""
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location("release_notes", ROOT / "tools" / "release_notes.py")
+    tool = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(tool)
+    text = "## [1.0.0] - 2026-10-30\n\nUse:\n\n```\n## not a heading\nfetch\n```\n\nDone.\n\n## [0.9.0] - 2026-01-01\n\n- old\n"
+    section = tool.changelog_section("1.0.0", text, final=True)
+    assert "## not a heading" in section and section.endswith("Done.") and "old" not in section
+    with pytest.raises(SystemExit, match="no release date"):
+        tool.changelog_section("1.0.0", "## [1.0.0]\n\n- x\n", final=True)

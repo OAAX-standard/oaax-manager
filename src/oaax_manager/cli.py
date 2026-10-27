@@ -64,12 +64,17 @@ def resolve(args: argparse.Namespace, index: list[Artifact]) -> Artifact:
     candidates = [a for a in index if a.kind == args.kind and a.vendor == args.vendor]
     if not candidates:
         known = sorted({a.vendor for a in index if a.kind == args.kind})
-        raise UserError(f"no {args.kind} for vendor {args.vendor!r}. Available: {', '.join(known)}")
+        other = sorted({a.kind for a in index if a.vendor == args.vendor})
+        if other:
+            raise UserError(f"no {args.kind} for vendor {args.vendor!r}, but it has a {' and a '.join(other)}: oaax-manager fetch {other[0]} {args.vendor}")
+        raise UserError(f"no {args.kind} for vendor {args.vendor!r}. Available: {', '.join(known) or 'none in this index'}")
+    where = ""
     if args.kind == "runtime":
         host_os, host_arch = host_platform()
         want_os, want_arch = args.os or host_os, args.arch or host_arch
         platforms = sorted({f"{a.os}-{a.arch}" for a in candidates})
         candidates = [a for a in candidates if a.os == want_os and a.arch == want_arch]
+        where = f" for {want_os}-{want_arch}"
         if not candidates:
             raise UserError(
                 f"no {args.vendor} runtime for {want_os}-{want_arch}. Available for {args.vendor}: {', '.join(platforms)}. "
@@ -78,14 +83,20 @@ def resolve(args: argparse.Namespace, index: list[Artifact]) -> Artifact:
     if args.version:
         candidates = [a for a in candidates if a.version == args.version]
         if not candidates:
-            raise UserError(f"no {args.kind} {args.vendor} version {args.version} for this platform")
-    else:  # default: the newest version that exists for this platform
+            raise UserError(f"no {args.kind} {args.vendor} version {args.version}{where}")
+    if args.variant:  # before the newest-version pick: the newest version may not have the build you asked for
+        wanted = [a for a in candidates if a.variant == args.variant]
+        if not wanted:
+            have = sorted({a.variant for a in candidates if a.variant})
+            raise UserError(
+                f"no {args.vendor} {args.kind} with variant {args.variant!r}{where}. "
+                + (f"Variants available{where}: {', '.join(have)}." if have else "It has no variants: leave --variant out.")
+                + (" Pass --os/--arch to look at another platform." if args.kind == "runtime" else "")
+            )
+        candidates = wanted
+    if not args.version:  # default: the newest version that exists for this platform (and variant)
         newest = max(version_key(a.version) for a in candidates)
         candidates = [a for a in candidates if version_key(a.version) == newest]
-    if args.variant:
-        candidates = [a for a in candidates if a.variant == args.variant]
-        if not candidates:
-            raise UserError(f"no {args.vendor} {args.kind} with variant {args.variant!r}")
     if len(candidates) > 1:
         options = ", ".join(sorted(a.variant or "-" for a in candidates))
         raise UserError(f"several builds match; choose one with --variant ({options})")

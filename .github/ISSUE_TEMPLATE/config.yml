@@ -4,5 +4,5 @@ contact_links:
     url: https://github.com/OAAX-standard/OAAX/discussions
     about: Questions and ideas that are not bugs belong in Discussions.
   - name: Security vulnerability
-    url: https://github.com/OAAX-standard/oaax-manager/security/advisories/new
-    about: Report vulnerabilities privately, never in a public issue.
+    url: https://github.com/OAAX-standard/oaax-manager/blob/main/SECURITY.md
+    about: Report vulnerabilities privately (see SECURITY.md), never in a public issue.

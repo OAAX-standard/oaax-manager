@@ -16,14 +16,27 @@ ROOT = Path(__file__).resolve().parent.parent
 
 
 def changelog_section(version: str, text: str, final: bool = False) -> str:
-    match = re.search(rf"^## \[{re.escape(version)}\]([^\n]*)\n(.*?)(?=^## |\Z)", text, re.M | re.S)
-    if not match:
+    """The body of `## [version]`, up to the next `## ` heading that is not inside a code fence."""
+    lines, body, heading, fenced = text.splitlines(), [], None, False
+    for line in lines:
+        if line.lstrip().startswith("```"):
+            fenced = not fenced
+        if not fenced and line.startswith("## "):
+            if heading is not None:
+                break
+            if re.match(rf"## \[{re.escape(version)}\]", line):
+                heading = line
+            continue
+        if heading is not None:
+            body.append(line)
+    if heading is None:
         raise SystemExit(f"CHANGELOG.md has no '## [{version}]' section: add one before releasing")
-    if final and "unreleased" in match[1].lower():
-        raise SystemExit(f"CHANGELOG.md heading for {version} still says 'unreleased': set the release date before tagging")
-    if not match[2].strip():
+    if final and not re.search(r"\d{4}-\d{2}-\d{2}", heading):
+        raise SystemExit(f"CHANGELOG.md heading '{heading}' has no release date (YYYY-MM-DD): set it before tagging")
+    section = "\n".join(body).strip()
+    if not section:
         raise SystemExit(f"CHANGELOG.md section for {version} is empty")
-    return match[2].strip()
+    return section
 
 
 def notes(version: str, sums: str, final: bool = False) -> str:

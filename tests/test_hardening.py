@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import http.server
 import json
 import os
 import sys
 import tarfile
+import threading
 
 import pytest
 
@@ -710,3 +712,113 @@ def test_fetch_help_says_newest_for_this_platform(capsys):
     with pytest.raises(SystemExit):
         cli.main(["fetch", "--help"])
     assert "newest version available for your platform" in " ".join(capsys.readouterr().out.split())
+
+
+# adversary round, second batch: variants, redirects, lock link, forged marker, unreadable file
+def _two_version_index(server, make_index, tmp_path, variants_new, variants_old):
+    root, _ = server
+    (root / "rt").mkdir(exist_ok=True)
+    entries = []
+    for version, variants in (("2.0.0", variants_old), ("2.1.0", variants_new)):
+        for variant in variants:
+            key = f"rt/h-{version}-{variant}.tar.gz"
+            make_tar(root / key, {"libRuntimeLibrary.so": f"{version}{variant}".encode()})
+            entries.append(entry(root, key, vendor="hailo", version=version, variant=variant))
+    return make_index(entries)
+
+
+def test_a_variant_error_lists_the_real_variants_for_the_platform(server, make_index, tmp_path, monkeypatch, capsys):
+    """A12a: the README's `--variant cuda12` example on another platform said only "no runtime with variant"."""
+    index = _two_version_index(server, make_index, tmp_path, ["hailort4.18.0", "hailort4.19.0"], ["hailort4.17.0"])
+    monkeypatch.setattr(cli, "host_platform", lambda: ("linux", "x86_64"))
+    assert run(index, "fetch", "runtime", "hailo", "--variant", "cuda99") == 1
+    err = capsys.readouterr().err
+    assert "variant 'cuda99' for linux-x86_64" in err and "hailort4.17.0, hailort4.18.0, hailort4.19.0" in err and "--os/--arch" in err
+
+
+def test_the_variant_is_filtered_before_the_newest_version_is_picked(server, make_index, tmp_path, monkeypatch, capsys):
+    """A12b: hailort4.17.0 exists only in 2.0.0; the newest version (2.1.0) lacks it, which used to read "no such variant"."""
+    index = _two_version_index(server, make_index, tmp_path, ["hailort4.18.0", "hailort4.19.0"], ["hailort4.17.0", "hailort4.18.0"])
+    monkeypatch.setattr(cli, "host_platform", lambda: ("linux", "x86_64"))
+    out = tmp_path / "o"
+    assert run(index, "fetch", "runtime", "hailo", "--variant", "hailort4.17.0", "-o", str(out)) == 0
+    assert (out / "runtime-hailo-2.0.0-linux-x86_64-hailort4.17.0" / "libRuntimeLibrary.so").exists()
+    assert run(index, "fetch", "runtime", "hailo", "--variant", "hailort4.18.0", "-o", str(out)) == 0  # in both: the newest wins
+    assert (out / "runtime-hailo-2.1.0-linux-x86_64-hailort4.18.0").is_dir()
+
+
+def test_a_vendor_that_exists_only_as_the_other_kind_says_so(server, make_index, capsys):
+    root, _ = server
+    (root / "tc").mkdir()
+    (root / "tc/t.tar").write_bytes(b"x" * 100)
+    index = make_index([entry(root, "tc/t.tar", kind="toolchain", os="any", arch="any")])
+    assert run(index, "fetch", "runtime", "cpu") == 1
+    err = capsys.readouterr().err
+    assert "oaax-manager fetch toolchain cpu" in err and "Available: \n" not in err and "Available: ," not in err
+
+
+class _Redirect(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(302)
+        self.send_header("Location", self.server.target)
+        self.end_headers()
+
+    log_message = lambda *a: None  # noqa: E731
+
+
+@pytest.mark.parametrize("target", ["ftp://127.0.0.1:2121/x", "http://203.0.113.9/x"])
+def test_a_redirect_to_anything_but_https_is_refused(tmp_path, target):
+    """A11: urllib followed redirects to ftp:// and http://, so "base_url must be https" was bypassable by any redirect."""
+    httpd = http.server.HTTPServer(("127.0.0.1", 0), _Redirect)
+    httpd.target = target
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    try:
+        with pytest.raises(download.ServerError, match="only https is allowed"):
+            download.download(f"http://127.0.0.1:{httpd.server_address[1]}/f", tmp_path / "f", 10, "0" * 64)
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
+
+
+def test_a_redirect_to_a_file_url_is_refused_too(tmp_path, monkeypatch):
+    monkeypatch.setattr(download.time, "sleep", lambda s: None)
+    httpd = http.server.HTTPServer(("127.0.0.1", 0), _Redirect)
+    httpd.target = "file:///etc/hostname"
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    try:
+        with pytest.raises(FetchError, match="not allowed"):  # urllib itself refuses this scheme
+            download.download(f"http://127.0.0.1:{httpd.server_address[1]}/f", tmp_path / "f", 10, "0" * 64)
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
+
+
+def test_a_dangling_lock_link_does_not_create_a_file_elsewhere(tmp_path):
+    target = tmp_path / "elsewhere" / "created"
+    (tmp_path / "elsewhere").mkdir()
+    (tmp_path / ".x.lock").symlink_to(target)
+    with pytest.raises(FetchError, match="lock file"):
+        with fetch_lock(tmp_path / "x"):
+            pass
+    assert not target.exists()
+
+
+def test_a_forged_marker_without_files_is_not_trusted(fetched, capsys):
+    index, dest = fetched
+    marker = dest / ".oaax-manager.json"
+    sha = json.loads(marker.read_text())["archive_sha256"]
+    marker.write_text(json.dumps({"archive_sha256": sha, "files": {}, "links": {}}))
+    assert run(index, "fetch", "runtime", "cpu", "-o", str(dest.parent)) == 1
+    assert "was not completed" in capsys.readouterr().err
+
+
+@pytest.mark.skipif(sys.platform == "win32" or os.geteuid() == 0, reason="needs POSIX permissions and a non-root user")
+def test_an_unreadable_extracted_file_says_which_one_and_what_to_do(fetched, capsys):
+    index, dest = fetched
+    (dest / "dep.so").chmod(0)
+    try:
+        assert run(index, "fetch", "runtime", "cpu", "-o", str(dest.parent)) == 1
+    finally:
+        (dest / "dep.so").chmod(0o644)
+    err = capsys.readouterr().err
+    assert "cannot read" in err and "dep.so" in err and "permissions" in err and "output directory" not in err

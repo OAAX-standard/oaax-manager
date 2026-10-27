@@ -16,6 +16,7 @@ import tarfile
 import time
 import unicodedata
 import urllib.error
+import urllib.parse
 import urllib.request
 from pathlib import Path, PurePosixPath, PureWindowsPath
 
@@ -72,7 +73,10 @@ def fetch_lock(target: Path):
     """Refuse to run twice for the same target: an advisory lock on `.<target>.lock` (flock / msvcrt, no stale locks)."""
     target.parent.mkdir(parents=True, exist_ok=True)
     path = target.with_name(f".{target.name}.lock")
-    handle = open(path, "a+b")
+    try:  # never follow a link planted at the lock path: it would create or touch a file somewhere else
+        handle = os.fdopen(os.open(path, os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_BINARY", 0), 0o644), "a+b")
+    except OSError as exc:
+        raise FetchError(f"cannot use the lock file {path}: {exc.strerror} (a link there? delete it and run again)") from exc
     try:
         try:
             if sys.platform == "win32":
@@ -117,6 +121,19 @@ def download(url: str, dest: Path, size: int, sha256: str) -> None:
         "The artifact changed upstream after this oaax-manager release (2.0.0 files are still re-uploaded on "
         "every vendor build): upgrade oaax-manager, or report it if it is already the latest."
     )
+
+
+class _HttpsOnlyRedirects(urllib.request.HTTPRedirectHandler):
+    """The index only allows https (http for localhost); a redirect must not lead anywhere else (http://, ftp://, file://)."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        parsed = urllib.parse.urlparse(newurl)
+        if parsed.scheme != "https" and not (parsed.scheme == "http" and parsed.hostname in ("127.0.0.1", "localhost")):
+            raise ServerError(f"{req.full_url} redirects to {newurl}: only https is allowed")
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+urllib.request.install_opener(urllib.request.build_opener(_HttpsOnlyRedirects))  # this is a CLI process: every urlopen below uses it
 
 
 def _more_data(response) -> bool:
@@ -337,11 +354,17 @@ def verify_extracted(dest: Path, sha256: str) -> list[str] | None:
             return None
     except (OSError, ValueError, KeyError, TypeError):
         return None
+    if not files:  # no archive of ours is empty: a marker listing no file was not written by an extraction
+        return None
     for name, want in files.items():
         path = dest / name
         if path.is_symlink() or not path.is_file():
             raise FetchError(f"{path} is missing or no longer a regular file; delete {dest} and run again")
-        if path.stat().st_size != want["size"] or sha256_file(path) != want["sha256"]:
+        try:
+            changed = path.stat().st_size != want["size"] or sha256_file(path) != want["sha256"]
+        except OSError as exc:
+            raise FetchError(f"cannot read {path}: {exc.strerror}; fix its permissions, or delete {dest} and run again") from exc
+        if changed:
             raise FetchError(f"{path} was modified after it was extracted; delete {dest} and run again")
     for name, target in links.items():
         path = dest / name
