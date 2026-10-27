@@ -11,3 +11,4 @@ First release.
 - Downloads are cut off with a clear error when the server is stalled or slower than 10 KB/s for 60 s (run the same command again to resume).
 - The index is shipped inside the package and regenerated with `tools/gen_index.py`; `--check` reports artifacts that were added, removed or re-uploaded.
 - Single-file `oaax-manager.pyz` and wheel built reproducibly by CI.
+- Published on PyPI as `oaax-manager` (trusted publishing from the release's own wheel).

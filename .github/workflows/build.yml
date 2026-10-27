@@ -1,6 +1,6 @@
 name: build
 # Builds the wheel and the single-file .pyz, checks them, and keeps them as workflow artifacts.
-# A tag vX.Y.Z also creates a DRAFT GitHub Release (a maintainer reviews and publishes it by hand). Nothing is published to PyPI.
+# A tag vX.Y.Z also creates a DRAFT GitHub Release (a maintainer reviews it and presses Publish; that triggers publish.yml, the only workflow that talks to PyPI).
 # "Run workflow" (workflow_dispatch) on any branch is the dry run: everything except the release job.
 on:
   push:

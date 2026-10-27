@@ -92,7 +92,8 @@ def fetch_lock(target: Path):
             raise OSError(errno.ELOOP, "is a symbolic link")
         handle = os.fdopen(os.open(path, os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_BINARY", 0), 0o644), "a+b")
     except OSError as exc:
-        raise FetchError(f"cannot use the lock file {path}: {exc.strerror} (a link there? delete it and run again)") from exc
+        hint = "a link there? delete it and run again" if exc.errno == errno.ELOOP else "check that the output directory, -o, is writable"
+        raise FetchError(f"cannot use the lock file {path}: {exc.strerror} ({hint})") from exc
     try:
         try:
             _try_lock(handle)

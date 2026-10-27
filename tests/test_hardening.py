@@ -1082,3 +1082,32 @@ def test_every_yaml_file_under_dot_github_parses():
     assert len(files) >= 5
     for path in files:
         yaml.safe_load(path.read_text())
+
+
+def test_the_readme_has_no_relative_links():
+    """PyPI renders README.md as the project page, where a relative link (CHANGELOG.md) is broken: links are absolute URLs or in-page anchors."""
+    import pathlib
+    import re
+
+    text = (pathlib.Path(__file__).resolve().parent.parent / "README.md").read_text()
+    relative = [t for t in re.findall(r"\]\(([^)\s]+)\)", text) if not t.startswith(("http://", "https://", "#", "mailto:"))]
+    assert relative == []
+
+
+def test_a_read_only_output_directory_does_not_blame_a_link(tmp_path):
+    """E3: the hint "a link there?" is for a symlink only; a permission error says to check that -o is writable."""
+    import os
+    import sys
+
+    if sys.platform == "win32" or os.geteuid() == 0:
+        pytest.skip("needs POSIX permissions and a non-root user")
+    out = tmp_path / "ro"
+    out.mkdir()
+    out.chmod(0o555)
+    try:
+        with pytest.raises(FetchError) as caught:
+            with fetch_lock(out / "x"):
+                pass
+    finally:
+        out.chmod(0o755)
+    assert "link" not in str(caught.value) and "writable" in str(caught.value)
