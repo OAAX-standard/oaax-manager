@@ -33,8 +33,9 @@ oaax-manager fetch runtime cpu                     # picks this machine's OS/arc
 oaax-manager fetch runtime nvidia-ort --variant cuda12   # several builds exist: you must choose (the error lists them)
 oaax-manager fetch runtime cpu --os linux --arch aarch64 -o ./runtimes
 oaax-manager fetch runtime cpu --artifact-version 2.0.0     # default: the newest version available for your platform
-oaax-manager fetch toolchain intel -o ./toolchains # saves the Docker image tar, then: docker load -i <file>
-# an existing runtime directory is never overwritten; delete it to fetch again
+oaax-manager fetch toolchain intel -o ./toolchains # saves <name>-<version>.tar, then: docker load -i <file>
+# an existing runtime directory is never overwritten; delete it to fetch again. Running the same command again re-checks its files against
+# the sha256 recorded at extraction and fails, naming the file, if one is missing or changed.
 ```
 
 What it guarantees:
@@ -44,6 +45,7 @@ What it guarantees:
 - The same command on the same release always fetches the same bytes; the index is part of the release, never fetched at run time.
 - Runtime archives are checked before extraction: absolute paths, `..`, and links pointing outside the target are refused.
 - The archive rules are strict on purpose and identical on every OS: links must be relative and point down (no `..`), nothing is written through an archive link, and names that collide on Windows/macOS (case or Unicode variants, `CON`, `aux.*`, trailing dots/spaces, `:` or `\`) are refused. A future vendor archive that breaks them fails with a clear message instead of extracting something ambiguous; relax the rule in `src/oaax_manager/download.py` deliberately if a legitimate archive needs it.
+- A hidden `.<name>.lock` file stays next to each target: it stops two fetches of the same target running at once. Leave it, or delete it when no fetch is running.
 - It never picks between builds for you (CUDA version, HailoRT version): it lists the choices.
 - `fetch toolchain` only downloads the tar. It does not touch Docker; run `docker load` yourself. Gated vendor SDKs are not handled.
 
@@ -53,7 +55,7 @@ macOS: no OAAX runtime is published for macOS yet, so `fetch runtime` says so; t
 
 The artifact bucket does not allow public listing, so the package ships `src/oaax_manager/index.json` (kind, vendor, platform, size, sha256, URL).
 Maintainers regenerate it with `uv run tools/gen_index.py` (needs `s3cmd` with read access): it lists the bucket, derives vendor, platform and
-variant from the key layout (no hand-written catalogue), and hashes whatever is new or changed. `--check` exits 1 if the index no longer matches the bucket.
+variant from the key layout (no hand-written catalogue), and hashes whatever is new or changed. `--check` exits 1 if the index no longer matches the bucket (any field but the etag), and 2 if it could not check (no `s3cmd`, network).
 Variant names (`cuda12`, `jetson-cuda12`, `ubuntu22.04-trt11-cuda13`, `hailort4.20.0`, ...) are derived from the key and kept stable.
 The NVIDIA TensorRT conversion `.whl` in the bucket is not indexed (it is a Python package, not a Docker toolchain).
 Today the vendor CI re-uploads `2.0.0` artifacts on every build, so a pinned hash can go stale: the CLI then fails with a clear

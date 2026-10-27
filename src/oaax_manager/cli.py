@@ -104,8 +104,14 @@ def cmd_fetch(args: argparse.Namespace, index: list[Artifact]) -> int:
     return fetch_runtime(artifact, out)
 
 
+def toolchain_filename(a: Artifact) -> str:
+    """The version is part of the name, so fetching 2.1.0 into the same -o never replaces the verified 2.0.0 (nor shares its .part)."""
+    path = Path(a.filename)
+    return a.filename if a.version in a.filename else f"{path.stem}-{a.version}{path.suffix}"
+
+
 def fetch_toolchain(a: Artifact, out: Path, force: bool) -> int:
-    dest = out / a.filename
+    dest = out / toolchain_filename(a)
     if out.resolve() not in dest.resolve().parents:
         raise FetchError(f"refusing to write outside {out}")
     if dest.is_dir():
@@ -174,7 +180,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_fetch = sub.add_parser("fetch", help="download and verify one artifact")
     p_fetch.add_argument("kind", choices=("runtime", "toolchain"))
     p_fetch.add_argument("vendor", help="see `oaax-manager list` (e.g. cpu, intel, nvidia-ort, nvidia-trt, hailo, deepx)")
-    p_fetch.add_argument("--artifact-version", dest="version", help="default: the newest in the index")
+    p_fetch.add_argument("--artifact-version", dest="version", help="default: the newest version available for your platform")
     p_fetch.add_argument("--variant", help="needed when several builds exist (e.g. cuda12)")
     p_fetch.add_argument("--os", choices=("linux", "windows", "macos"), help="runtimes only; default: this machine")
     p_fetch.add_argument("--arch", choices=("x86_64", "aarch64"), help="runtimes only; default: this machine")

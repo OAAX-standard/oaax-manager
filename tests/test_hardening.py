@@ -67,7 +67,7 @@ def test_unwritable_output_parent(bucket, tmp_path, capsys):
 
 
 def test_toolchain_destination_is_a_directory(bucket, tmp_path, capsys):
-    (tmp_path / "o" / "tool.tar").mkdir(parents=True)
+    (tmp_path / "o" / "tool-2.0.0.tar").mkdir(parents=True)
     assert run(bucket[1], "fetch", "toolchain", "cpu", "-o", str(tmp_path / "o")) == 1
     assert "is a directory" in capsys.readouterr().err
 
@@ -75,7 +75,7 @@ def test_toolchain_destination_is_a_directory(bucket, tmp_path, capsys):
 # F6: a second fetch of the same target is refused, the lock is released afterwards
 def test_concurrent_fetch_is_refused(bucket, tmp_path, capsys):
     out = tmp_path / "o"
-    with fetch_lock(out / "tool.tar"):
+    with fetch_lock(out / "tool-2.0.0.tar"):
         assert run(bucket[1], "fetch", "toolchain", "cpu", "-o", str(out)) == 1
         assert "another oaax-manager is already fetching" in capsys.readouterr().err
     assert run(bucket[1], "fetch", "toolchain", "cpu", "-o", str(out)) == 0
@@ -111,9 +111,9 @@ def test_failed_extraction_removes_the_verified_archive(server, make_index, tmp_
 def test_stale_part_is_retried_from_zero(bucket, tmp_path, stale):
     out = tmp_path / "o"
     out.mkdir()
-    (out / "tool.tar.part").write_bytes(stale)
+    (out / "tool-2.0.0.tar.part").write_bytes(stale)
     assert run(bucket[1], "fetch", "toolchain", "cpu", "-o", str(out)) == 0
-    assert (out / "tool.tar").read_bytes() == b"docker-image" * 1000
+    assert (out / "tool-2.0.0.tar").read_bytes() == b"docker-image" * 1000
 
 
 def test_resume_response_for_another_offset_is_not_trusted(bucket, tmp_path, monkeypatch):
@@ -121,9 +121,9 @@ def test_resume_response_for_another_offset_is_not_trusted(bucket, tmp_path, mon
     monkeypatch.setattr(download, "_resumes_at", lambda r, have: False)  # server "answers for another offset"
     out = tmp_path / "o"
     out.mkdir()
-    (out / "tool.tar.part").write_bytes(b"docker-image" * 400)
+    (out / "tool-2.0.0.tar.part").write_bytes(b"docker-image" * 400)
     assert run(bucket[1], "fetch", "toolchain", "cpu", "-o", str(out)) == 0
-    assert (out / "tool.tar").read_bytes() == b"docker-image" * 1000
+    assert (out / "tool-2.0.0.tar").read_bytes() == b"docker-image" * 1000
     assert real  # the real check is exercised by test_resume_continues_partial_download
 
 
@@ -332,7 +332,7 @@ def test_docker_load_hint_is_quoted(bucket, tmp_path, capsys):
     assert run(bucket[1], "fetch", "toolchain", "cpu", "-o", str(out)) == 0
     hint = [l for l in capsys.readouterr().out.splitlines() if "docker load" in l][0]
     import shlex
-    assert shlex.split(hint.split("docker load -i ", 1)[1].split("\n")[0])[0] == str(out / "tool.tar")
+    assert shlex.split(hint.split("docker load -i ", 1)[1].split("\n")[0])[0] == str(out / "tool-2.0.0.tar")
 
 
 def test_small_files_do_not_report_zero_megabytes(bucket, tmp_path, capsys):
@@ -548,11 +548,11 @@ def test_a_symlinked_part_is_not_resumed_into(bucket, tmp_path, monkeypatch):
     victim.write_text("PRECIOUS\n")
     out = tmp_path / "o"
     out.mkdir()
-    (out / "tool.tar.part").symlink_to(victim)
+    (out / "tool-2.0.0.tar.part").symlink_to(victim)
     monkeypatch.setattr(cli, "host_platform", lambda: ("linux", "x86_64"))
     assert run(bucket[1], "fetch", "toolchain", "cpu", "-o", str(out)) == 0
     assert victim.read_text() == "PRECIOUS\n"
-    assert (out / "tool.tar").read_bytes() == b"docker-image" * 1000
+    assert (out / "tool-2.0.0.tar").read_bytes() == b"docker-image" * 1000
 
 
 def test_the_part_is_opened_without_following_a_link(tmp_path):
@@ -671,3 +671,42 @@ def test_a_body_that_arrived_whole_succeeds_even_if_its_end_marker_never_does(cu
     download.download(url, tmp_path / "f", len(DATA), hashlib.sha256(DATA).hexdigest())
     assert (tmp_path / "f").read_bytes() == DATA
     assert len(httpd.requests) == 1
+
+
+# adversary round A6/A8/A9: smaller defects
+def test_differences_compare_whole_entries_but_not_the_etag():
+    """A6: --check compared only sha256, so a vendor id or variant that regeneration would rename went unnoticed."""
+    a = dict(kind="runtime", vendor="nvidia-ort", version="2.0.0", os="linux", arch="x86_64", variant="cuda12", key="k", size=1, etag="e1", sha256="a" * 64)
+    assert gen_index.differences([a], [{**a, "etag": "e2"}]) == []
+    assert gen_index.differences([a], [{**a, "vendor": "nvidia-onnx"}]) == ["CHANGED: k (vendor)"]
+    assert gen_index.differences([a], [{**a, "variant": None, "size": 2}]) == ["CHANGED: k (size, variant)"]
+    assert gen_index.differences([a], []) == ["gone:    k"] and gen_index.differences([], [a]) == ["new:     k"]
+
+
+def test_gen_index_exits_2_when_it_could_not_check(tmp_path):
+    """A6: exit 1 means "the index differs"; a crash must not look like that."""
+    import subprocess
+
+    done = subprocess.run([sys.executable, os.path.join(os.path.dirname(__file__), "..", "tools", "gen_index.py"), "--check", "--listing", str(tmp_path / "missing")], capture_output=True, text=True)
+    assert done.returncode == 2 and "error:" in done.stderr
+
+
+def test_two_toolchain_versions_can_share_one_output_directory(server, make_index, tmp_path, monkeypatch):
+    """A8: the toolchain file was named after the key basename only, so fetching 2.1.0 replaced the verified 2.0.0 tar."""
+    root, _ = server
+    (root / "tc").mkdir()
+    (root / "tc/tool.tar").write_bytes(b"v2.0" * 100)
+    (root / "tc/tool21.tar").write_bytes(b"v2.1" * 100)
+    index = make_index([entry(root, "tc/tool.tar", kind="toolchain", os="any", arch="any"),
+                        entry(root, "tc/tool21.tar", kind="toolchain", os="any", arch="any", version="2.1.0")])
+    out = tmp_path / "o"
+    assert run(index, "fetch", "toolchain", "cpu", "--artifact-version", "2.0.0", "-o", str(out)) == 0
+    assert run(index, "fetch", "toolchain", "cpu", "--artifact-version", "2.1.0", "-o", str(out)) == 0
+    assert sorted(p.name for p in out.glob("*.tar")) == ["tool-2.0.0.tar", "tool21-2.1.0.tar"]
+    assert (out / "tool-2.0.0.tar").read_bytes() == b"v2.0" * 100
+
+
+def test_fetch_help_says_newest_for_this_platform(capsys):
+    with pytest.raises(SystemExit):
+        cli.main(["fetch", "--help"])
+    assert "newest version available for your platform" in " ".join(capsys.readouterr().out.split())

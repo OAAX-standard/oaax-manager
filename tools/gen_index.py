@@ -7,7 +7,7 @@ the listing can also be given as files. Hashes of unchanged objects (same size a
     uv run tools/gen_index.py                              # list s3://oaax/*/2.0.0 and update the index
     uv run tools/gen_index.py --version 2.1.0              # add another version (kept next to the others)
     uv run tools/gen_index.py --listing a.txt --listing b.txt   # use saved `s3cmd ls --recursive` output
-    uv run tools/gen_index.py --check                      # exit 1 if the index is out of date (new, gone or changed)
+    uv run tools/gen_index.py --check                      # exit 1 if the index is out of date (new, gone or changed), 2 if it could not check
 """
 
 from __future__ import annotations
@@ -138,6 +138,19 @@ def build_entry(item: dict, old: dict[str, dict]) -> dict:
     return {**item, "size": size, "etag": etag, "sha256": sha256_of(item["key"], size, etag)}
 
 
+def differences(before: list[dict], after: list[dict]) -> list[str]:
+    """What a regeneration would change. Whole entries are compared (vendor id, platform, variant, size, sha256), only the etag is ignored."""
+    old, new = {a["key"]: a for a in before}, {a["key"]: a for a in after}
+    keep = lambda a: {k: v for k, v in a.items() if k != "etag"}  # noqa: E731
+    problems = [f"new:     {k}" for k in sorted(new.keys() - old.keys())]
+    problems += [f"gone:    {k}" for k in sorted(old.keys() - new.keys())]
+    for k in sorted(new.keys() & old.keys()):
+        changed = sorted(f for f in keep(new[k]).keys() | keep(old[k]).keys() if keep(new[k]).get(f) != keep(old[k]).get(f))
+        if changed:
+            problems.append(f"CHANGED: {k} ({', '.join(changed)})")
+    return problems
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--version", default="2.0.0", help="OAAX version to (re)index; other versions stay as they are")
@@ -168,11 +181,7 @@ def main() -> int:
     with ThreadPoolExecutor(max_workers=4) as pool:
         fresh = list(pool.map(work, catalog))
 
-    before = {a["key"]: a["sha256"] for a in previous if a["version"] == args.version}
-    after = {a["key"]: a["sha256"] for a in fresh}
-    problems = [f"new:     {k}" for k in sorted(after.keys() - before.keys())]
-    problems += [f"gone:    {k}" for k in sorted(before.keys() - after.keys())]
-    problems += [f"CHANGED: {k}" for k in sorted(after.keys() & before.keys()) if after[k] != before[k]]
+    problems = differences([a for a in previous if a["version"] == args.version], fresh)
     if problems:
         print("index differs from the bucket:\n  " + "\n  ".join(problems), file=sys.stderr)
     if args.check:
@@ -186,4 +195,13 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    try:
+        sys.exit(main())
+    except SystemExit as exc:
+        if isinstance(exc.code, str):  # a message, not "the index differs"
+            print(exc.code, file=sys.stderr)
+            sys.exit(2)
+        raise
+    except Exception as exc:  # s3cmd missing, network, a crash: exit 1 is reserved for "the index differs"
+        print(f"error: {type(exc).__name__}: {exc}", file=sys.stderr)
+        sys.exit(2)

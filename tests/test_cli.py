@@ -62,7 +62,7 @@ def test_fetch_runtime_extracts_and_removes_archive(bucket, monkeypatch, tmp_pat
 def test_fetch_toolchain_verifies_and_hints_docker(bucket, tmp_path, capsys):
     out = tmp_path / "out"
     assert run(bucket[1], "fetch", "toolchain", "cpu", "-o", str(out)) == 0
-    assert (out / "tool.tar").stat().st_size == 12000
+    assert (out / "tool-2.0.0.tar").stat().st_size == 12000
     assert "docker load -i" in capsys.readouterr().out
     assert run(bucket[1], "fetch", "toolchain", "cpu", "-o", str(out)) == 0
     assert "already downloaded" in capsys.readouterr().out
@@ -129,9 +129,9 @@ def test_resume_continues_partial_download(bucket, tmp_path):
     data = (root / "tc/tool.tar").read_bytes()
     out = tmp_path / "o"
     out.mkdir()
-    (out / "tool.tar.part").write_bytes(data[:5000])
+    (out / "tool-2.0.0.tar.part").write_bytes(data[:5000])
     assert run(index, "fetch", "toolchain", "cpu", "-o", str(out)) == 0
-    assert (out / "tool.tar").read_bytes() == data
+    assert (out / "tool-2.0.0.tar").read_bytes() == data
 
 
 def test_server_down_is_a_clean_error(bucket, monkeypatch, tmp_path, capsys):
