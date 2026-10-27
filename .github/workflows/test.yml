@@ -1,5 +1,9 @@
 name: tests
-on: [push, pull_request]
+on:
+  push:
+    branches: ["**"]  # tags are tested through the release workflow (workflow_call below), not twice
+  pull_request:
+  workflow_call:
 
 permissions:
   contents: read

@@ -1,5 +1,5 @@
 name: Bug report
-description: `oaax-manager list` or `fetch` does something wrong, or an error message does not help.
+description: "`oaax-manager list` or `fetch` does something wrong, or an error message does not help."
 labels: [bug]
 body:
   - type: markdown

@@ -11,6 +11,7 @@ import os
 import re
 import shutil
 import ssl
+import stat
 import sys
 import tarfile
 import time
@@ -68,6 +69,19 @@ def _progress(done: int, total: int) -> None:
         print(f"  {_size(done)} / {_size(total)} ({percent}%)", file=sys.stderr, flush=True)
 
 
+# What a lock that is held by someone else raises: flock(LOCK_NB) on POSIX, msvcrt.locking(LK_NBLCK) on Windows. Anything else is a different problem.
+LOCKED_ERRNO = {errno.EAGAIN, errno.EWOULDBLOCK} | ({errno.EACCES, errno.EDEADLK} if sys.platform == "win32" else set())
+
+
+def _try_lock(handle) -> None:
+    if sys.platform == "win32":
+        import msvcrt
+        msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+    else:
+        import fcntl
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+
 @contextlib.contextmanager
 def fetch_lock(target: Path):
     """Refuse to run twice for the same target: an advisory lock on `.<target>.lock` (flock / msvcrt, no stale locks)."""
@@ -81,17 +95,20 @@ def fetch_lock(target: Path):
         raise FetchError(f"cannot use the lock file {path}: {exc.strerror} (a link there? delete it and run again)") from exc
     try:
         try:
-            if sys.platform == "win32":
-                import msvcrt
-                msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
-            else:
-                import fcntl
-                fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except OSError:
-            raise FetchError(f"another oaax-manager is already fetching {target.name} (lock: {path})") from None
+            _try_lock(handle)
+        except OSError as exc:
+            if exc.errno in LOCKED_ERRNO:
+                raise FetchError(f"another oaax-manager is already fetching {target.name} (lock: {path})") from None
+            raise FetchError(f"cannot lock {path}: {exc.strerror} (some network and FUSE file systems have no file locks: use -o on a local disk)") from exc
         yield
     finally:
         handle.close()  # releases the lock; the empty file is never deleted (unlinking a held lock file is racy)
+
+
+STALE_PIN = (
+    "The artifact changed upstream after this oaax-manager release (2.0.0 files are still re-uploaded on "
+    "every vendor build): upgrade oaax-manager, or report it if it is already the latest."
+)
 
 
 def download(url: str, dest: Path, size: int, sha256: str) -> None:
@@ -118,19 +135,17 @@ def download(url: str, dest: Path, size: int, sha256: str) -> None:
         part.unlink()
         if not resumed:
             break
-    raise FetchError(
-        f"sha256 mismatch for {url}\n  expected {sha256}\n  got      {actual}\n"
-        "The artifact changed upstream after this oaax-manager release (2.0.0 files are still re-uploaded on "
-        "every vendor build): upgrade oaax-manager, or report it if it is already the latest."
-    )
+    raise FetchError(f"sha256 mismatch for {url}\n  expected {sha256}\n  got      {actual}\n{STALE_PIN}")
 
 
 class _HttpsOnlyRedirects(urllib.request.HTTPRedirectHandler):
     """The index only allows https (http for localhost); a redirect must not lead anywhere else (http://, ftp://, file://)."""
 
     def redirect_request(self, req, fp, code, msg, headers, newurl):
-        parsed = urllib.parse.urlparse(newurl)
-        if parsed.scheme != "https" and not (parsed.scheme == "http" and parsed.hostname in ("127.0.0.1", "localhost")):
+        parsed, origin = urllib.parse.urlparse(newurl), urllib.parse.urlparse(req.full_url)
+        local = lambda u: u.scheme == "http" and u.hostname in ("127.0.0.1", "localhost")  # noqa: E731
+        # http is only for tests against a localhost base_url: an https origin must never make us GET a local http service
+        if parsed.scheme != "https" and not (local(parsed) and local(origin)):
             raise ServerError(f"{req.full_url} redirects to {newurl}: only https is allowed")
         return super().redirect_request(req, fp, code, msg, headers, newurl)
 
@@ -179,6 +194,10 @@ class ServerError(FetchError):
     """A failure that retrying cannot fix (server misbehaves, HTTP 4xx, TLS trust, no space, no permission)."""
 
 
+class SlowDownload(ServerError):
+    """Too slow for the guard: retrying the same link would only wait out the same window again (the .part is kept for the next run)."""
+
+
 PERMANENT_ERRNO = {errno.ENOSPC, errno.EACCES, errno.EPERM, errno.EROFS, errno.EISDIR, errno.ENOTDIR, errno.EDQUOT}
 
 
@@ -193,9 +212,9 @@ def _transfer(url: str, part: Path, have: int, size: int) -> None:
                 response.close()
                 return _transfer(url, part, 0, size)
             announced = response.headers.get("Content-Length")
-            if announced is not None and announced.isdigit() and int(announced) > size - have:
+            if announced is not None and announced.isdigit() and int(announced) != size - have:  # larger or smaller than the pinned size: a re-upload
                 part.unlink(missing_ok=True)
-                raise ServerError(f"{url} announces {announced} bytes but only {size - have} are expected")
+                raise ServerError(f"{url} announces {announced} bytes but {size - have} are expected\n{STALE_PIN}")
             window_start, window_bytes = time.monotonic(), 0
             with _open_part(part, append=bool(have)) as out:
                 while have < size:
@@ -209,15 +228,18 @@ def _transfer(url: str, part: Path, have: int, size: int) -> None:
                     now = time.monotonic()
                     if now - window_start >= SLOW_WINDOW:
                         if window_bytes < MIN_RATE * (now - window_start):
-                            raise FetchError(
+                            raise SlowDownload(
                                 f"download of {url} is too slow (under {MIN_RATE // 1000} KB/s for {SLOW_WINDOW} s): "
                                 "check the connection, then run the same command again to resume"
                             )
                         window_start, window_bytes = now, 0
             if have == size and _more_data(response):
                 part.unlink(missing_ok=True)
-                raise ServerError(f"{url} sent more data than the indexed size ({size} bytes)")
+                raise ServerError(f"{url} sent more data than the indexed size ({size} bytes)\n{STALE_PIN}")
     except urllib.error.HTTPError as exc:
+        if exc.code == 416 and have:  # the object is shorter than the pinned size (a re-upload): the .part can never be completed
+            part.unlink(missing_ok=True)
+            raise ServerError(f"{url} cannot continue at byte {have} (HTTP 416): it is shorter than the {size} bytes this release pins\n{STALE_PIN}") from exc
         if 400 <= exc.code < 500 and exc.code not in (408, 429):
             raise ServerError(f"download failed for {url}: HTTP {exc.code} {exc.reason}") from exc
         raise FetchError(f"download failed for {url}: HTTP {exc.code} {exc.reason} (run the same command again to resume)") from exc
@@ -264,7 +286,7 @@ def _check_member(member: tarfile.TarInfo, root: Path, links: set[str], seen: se
     parts = PurePosixPath(name).parts
     if ".." in parts or not (root / name).resolve().is_relative_to(root):
         raise FetchError(f"unsafe archive: {name!r} escapes the target directory")
-    if PurePosixPath(name).parts == (MARKER,):
+    if _fold(name.rstrip("/")) == _fold(MARKER):  # case-insensitive file systems would let it overwrite the marker
         raise FetchError(f"unsafe archive: {name!r} is reserved for oaax-manager")
     if member.isdev() or member.isfifo():
         raise FetchError(f"unsafe archive: special file {name!r}")
@@ -324,15 +346,18 @@ def safe_extract(archive: Path, dest: Path, sha256: str | None = None) -> list[s
                 else:
                     tar.extract(member, root)
         _normalise_modes(root, members)
+        manifest = _manifest(root, members)
+        if not manifest["files"]:
+            raise FetchError(f"{archive.name} contains no file (only directories or links): the artifact is broken upstream, nothing was installed; please report it")
         # Proves "fully extracted from a verified archive", and records what was extracted so a rerun can check it still is.
-        (root / MARKER).write_text(json.dumps({"archive_sha256": sha256, **_manifest(root, members)}))
+        (root / MARKER).write_text(json.dumps({"archive_sha256": sha256, **manifest}))
         replace_with_retry(tmp, dest)
     except Exception as exc:  # tarfile/zlib raise EOFError, KeyError, zlib.error, ... on broken archives
         shutil.rmtree(tmp, ignore_errors=True)
         if isinstance(exc, FetchError):
             raise
         raise FetchError(f"cannot extract {archive.name}: {type(exc).__name__}: {exc}") from exc
-    return sorted(m.name for m in members if m.isfile())
+    return sorted(manifest["files"])  # the same list a rerun re-checks (hard links of the archive are plain files once extracted)
 
 
 def _manifest(root: Path, members: list[tarfile.TarInfo]) -> dict:
@@ -342,7 +367,7 @@ def _manifest(root: Path, members: list[tarfile.TarInfo]) -> dict:
         if path.is_symlink():
             links[member.name] = os.readlink(path)
         elif path.is_file():  # also hard links of the archive, which are plain files once extracted
-            files[member.name] = {"size": path.stat().st_size, "sha256": sha256_file(path)}
+            files[member.name] = {"size": path.stat().st_size, "sha256": sha256_file(path), "mode": stat.S_IMODE(path.stat().st_mode)}
     return {"files": files, "links": links}
 
 
@@ -354,6 +379,8 @@ def verify_extracted(dest: Path, sha256: str) -> list[str] | None:
     try:
         marker = json.loads((dest / MARKER).read_text())
         files, links = marker["files"], marker["links"]
+        for want in files.values():
+            want["mode"]  # a marker without the permissions is the older format
         if marker["archive_sha256"] != sha256:
             return None
     except (OSError, ValueError, KeyError, TypeError):
@@ -366,6 +393,8 @@ def verify_extracted(dest: Path, sha256: str) -> list[str] | None:
             raise FetchError(f"{path} is missing or no longer a regular file; delete {dest} and run again")
         try:
             changed = path.stat().st_size != want["size"] or sha256_file(path) != want["sha256"]
+            if sys.platform != "win32" and stat.S_IMODE(path.stat().st_mode) != want["mode"]:  # e.g. a setuid or world-writable library
+                raise FetchError(f"{path} has other permissions than when it was extracted ({oct(stat.S_IMODE(path.stat().st_mode))}, not {oct(want['mode'])}); delete {dest} and run again")
         except OSError as exc:
             raise FetchError(f"cannot read {path}: {exc.strerror}; fix its permissions, or delete {dest} and run again") from exc
         if changed:
@@ -377,8 +406,14 @@ def verify_extracted(dest: Path, sha256: str) -> list[str] | None:
     return sorted(files)
 
 
+def part_bytes(target: Path) -> int:
+    """What an interrupted earlier run already downloaded for `target` (its .part), so the disk check does not ask for it twice."""
+    part = target.with_name(target.name + ".part")
+    return part.stat().st_size if part.is_file() and not part.is_symlink() else 0
+
+
 def check_disk_space(directory: Path, needed: int) -> None:
     directory.mkdir(parents=True, exist_ok=True)
     free = shutil.disk_usage(directory).free
-    if free < needed:
+    if free < max(needed, 0):
         raise FetchError(f"not enough disk space in {directory}: need about {needed / 1e9:.1f} GB, {free / 1e9:.1f} GB free")
