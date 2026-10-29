@@ -2,6 +2,10 @@
 
 All notable changes to oaax-manager. Versions follow [semver](https://semver.org/); the artifact index (`index.json`) is part of each release.
 
+## [0.1.1] - 2026-10-29
+
+- Index refreshed: the nine Hailo 2.0.0 artifacts (8 runtimes, the toolchain) were re-uploaded on 2026-10-28 with the reselect and input-order fixes, so the pinned sha256 of 0.1.0 no longer matched and `fetch runtime hailo` failed verification. Nothing else changed: the other 34 entries are identical.
+
 ## [0.1.0] - 2026-10-27
 
 First release.

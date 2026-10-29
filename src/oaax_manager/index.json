@@ -34,9 +34,9 @@
       "arch": "any",
       "variant": null,
       "key": "conversion-toolchain/2.0.0/HAILO/oaax-hailo-toolchain.tar",
-      "size": 1244024832,
-      "etag": "73af39108335b41422bd7c4612fb0cc6-80",
-      "sha256": "e5a7e131521d1d1e4fec656ce322ba9950303fdc91037ac6d1db9cec9a8ec547"
+      "size": 1243357696,
+      "etag": "6722ba69648e8583e701c6fa9615e10e-80",
+      "sha256": "c96126ce0f7a5182125634413e2c7f51d0d458e35bb09586d7843d51901a0fbc"
     },
     {
       "kind": "toolchain",
@@ -190,9 +190,9 @@
       "arch": "aarch64",
       "variant": "hailort4.17.0",
       "key": "runtimes/2.0.0/HAILO/aarch64/Ubuntu/library-4.17.0.tar.gz",
-      "size": 8203168,
-      "etag": "bbc7c75b2b569971d91352ff94b853a5",
-      "sha256": "2776b9dc1e046574beea502505079550e072ad411b45c237d11b9d375f63d5ba"
+      "size": 7225836,
+      "etag": "1337c178f83652b2fe80e660d2ee882a",
+      "sha256": "a2553b4d969eb4fd7d71813e86ab08bbede7401f9f759d49ad9629523149d2c1"
     },
     {
       "kind": "runtime",
@@ -202,9 +202,9 @@
       "arch": "aarch64",
       "variant": "hailort4.18.0",
       "key": "runtimes/2.0.0/HAILO/aarch64/Ubuntu/library-4.18.0.tar.gz",
-      "size": 8421092,
-      "etag": "d4701c5562b166646a6aa7c57c9a4a6b",
-      "sha256": "101dc6759268a6595990b7e843d8ec102e4f36c12836e33c2e2b45926c4b137d"
+      "size": 7444905,
+      "etag": "df2e113fe92424a6bc2f1cb6f0e96e9a",
+      "sha256": "db0ff932c7d03d5c8a3a393956bbff5fcdefbe9962d71a7b540d28aea7bcef4f"
     },
     {
       "kind": "runtime",
@@ -214,9 +214,9 @@
       "arch": "aarch64",
       "variant": "hailort4.19.0",
       "key": "runtimes/2.0.0/HAILO/aarch64/Ubuntu/library-4.19.0.tar.gz",
-      "size": 8575471,
-      "etag": "f4081ba4871b4641e8dedefc0742d964",
-      "sha256": "7b2f72e39343e44557fe281741633b84ab3fc4ba0d667bcbe0c967207fe43c8d"
+      "size": 7598788,
+      "etag": "88221508f51882441358008b6e26126f",
+      "sha256": "718bbf7af3eab66a10fc7df943484d57d05e5170a4c1179c45becf5daffe6e3b"
     },
     {
       "kind": "runtime",
@@ -226,9 +226,9 @@
       "arch": "aarch64",
       "variant": "hailort4.20.0",
       "key": "runtimes/2.0.0/HAILO/aarch64/Ubuntu/library-4.20.0.tar.gz",
-      "size": 8715909,
-      "etag": "c73dfddd1ada56942ddc557a7c717a03",
-      "sha256": "850de4619a2da8186caa51aa86a380c0f09ceddb98cc347ac2fed1c9eca066a6"
+      "size": 7737148,
+      "etag": "1672bd9497c39331bb5221ddadad36b8",
+      "sha256": "6c4946ee581f10579cfde1d07e6e3b1611e969f8e26b4ae85ae2b3928fa9b939"
     },
     {
       "kind": "runtime",
@@ -238,9 +238,9 @@
       "arch": "x86_64",
       "variant": "hailort4.17.0",
       "key": "runtimes/2.0.0/HAILO/x86_64/Ubuntu/library-4.17.0.tar.gz",
-      "size": 8817243,
-      "etag": "53f59d20d0a1ca47512497f9558cce14",
-      "sha256": "55d1d9ec46f4006cd516953014884555ec23e46ba55c4d249797513c43b8ae62"
+      "size": 7773309,
+      "etag": "f70a1d1fce476efbc8532c38bee556c7",
+      "sha256": "bd1ae1ebc5e8be2898e981fc32e9c0cf456d40cef6c978f4e6a37beba4fe950b"
     },
     {
       "kind": "runtime",
@@ -250,9 +250,9 @@
       "arch": "x86_64",
       "variant": "hailort4.18.0",
       "key": "runtimes/2.0.0/HAILO/x86_64/Ubuntu/library-4.18.0.tar.gz",
-      "size": 9046313,
-      "etag": "fd2428f79f034af23910feb9eb5cbbdd",
-      "sha256": "084a70a3feb49965a54bea7a7d561808b41025afef90b69ea0705bc060e1e5c2"
+      "size": 8000401,
+      "etag": "5ba720b64aeaac1c005389855ca553db",
+      "sha256": "8706410b71a12985d211f84f088348749a8b92b080721cf42ff857c2927f9067"
     },
     {
       "kind": "runtime",
@@ -262,9 +262,9 @@
       "arch": "x86_64",
       "variant": "hailort4.19.0",
       "key": "runtimes/2.0.0/HAILO/x86_64/Ubuntu/library-4.19.0.tar.gz",
-      "size": 9218999,
-      "etag": "2a9381b9f778f73d88f4d07ab552ae46",
-      "sha256": "8df96e1976b1bff4b0b4a00edf74fbede4676ee0105e89091d975abb40938f53"
+      "size": 8173494,
+      "etag": "24545599f87ae67fd21781d6a3f6181c",
+      "sha256": "c909d8e4397b3da24c6b72178fb55ceb56376b47440f0870d2fed28ac1e5c8ab"
     },
     {
       "kind": "runtime",
@@ -274,9 +274,9 @@
       "arch": "x86_64",
       "variant": "hailort4.20.0",
       "key": "runtimes/2.0.0/HAILO/x86_64/Ubuntu/library-4.20.0.tar.gz",
-      "size": 9359062,
-      "etag": "e5f629f8cd91e582637becfde174704c",
-      "sha256": "baf0f6edacf2dce09b60d0368158d18483b81011522c5b27fa99a865be728954"
+      "size": 8314223,
+      "etag": "79a8e46817a5f63f0f432d7cd34b09a8",
+      "sha256": "df5195977d787af8e1f72fdf4584832eea186b9e77f918b82a35b92ff4292e5e"
     },
     {
       "kind": "runtime",
