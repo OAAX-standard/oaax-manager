@@ -408,7 +408,9 @@ def run(*argv):
 @pytest.fixture
 def machine(monkeypatch):
     def use(**kw):
-        monkeypatch.setattr(cli, "System", lambda: Fake(**{"libs": BASE_LIBS, **kw}))
+        fake = Fake(**{"libs": BASE_LIBS, **kw})
+        monkeypatch.setattr(cli, "System", lambda: fake)
+        monkeypatch.setattr(cli, "host_platform", lambda: (fake.os, fake.arch))  # fetch resolves the platform itself: pin it, or macOS runners differ
     return use
 
 
