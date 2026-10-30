@@ -6,6 +6,7 @@ build-backend = "setuptools.build_meta"
 name = "oaax-manager"
 dynamic = ["version"]
 description = "List and fetch OAAX runtimes and toolchains"
+maintainers = [{ name = "OAAX", email = "pypi@oaax.org" }]
 readme = "README.pypi.md"  # the PyPI page; the GitHub README is longer
 requires-python = ">=3.9"
 license = { text = "Apache-2.0" }
