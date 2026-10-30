@@ -75,6 +75,18 @@
       "sha256": "bc81bc4b0fa59857b8bde3a878f4a6a04b978e68864e73e7e64bb5f3736710a6"
     },
     {
+      "kind": "wheel",
+      "vendor": "nvidia-trt",
+      "version": "2.0.0",
+      "os": "any",
+      "arch": "any",
+      "variant": null,
+      "key": "conversion-toolchain/2.0.0/NVIDIA/oaax_nvidia_tensorrt_conversion-2.0.0-py3-none-any.whl",
+      "size": 12898,
+      "etag": "94ef5e903614cb8557db1b05dae70027",
+      "sha256": "a5e029013468fb0d8e697b48fd94ce1b0e6ef48e0418f43785046fcff5782784"
+    },
+    {
       "kind": "runtime",
       "vendor": "cpu",
       "version": "2.0.0",

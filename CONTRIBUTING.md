@@ -29,7 +29,7 @@ The artifact bucket does not allow public listing, so the package ships `src/oaa
 - **Regenerate** it with `uv run tools/gen_index.py` (maintainers with `s3cmd` read access). It lists the bucket, derives vendor, platform and variant from the key layout (no hand-written catalogue), and hashes whatever is new or changed.
 - **Check** it with `--check`: exit 1 if the index no longer matches the bucket (any field but the etag), exit 2 if it could not check (no `s3cmd`, network).
 - **Variant names** (`cuda12`, `jetson-cuda12`, `ubuntu22.04-trt11-cuda13`, `hailort4.20.0`, ...) are derived from the key and kept stable.
-- The NVIDIA TensorRT conversion `.whl` in the bucket is not indexed (it is a Python package, not a Docker toolchain).
+- Three kinds are indexed: `runtime`, `toolchain` (Docker tar) and `wheel` (`oaax_<name>_conversion-<version>-py3-none-any.whl`, the Python conversion toolchain). A wheel whose version differs from its folder's is skipped, not guessed. A new kind needs a `KINDS` entry in `index.py`, a pattern in `gen_index.py` and a hint in `fetch_file`.
 - **Stale pins:** today the vendor CI re-uploads `2.0.0` artifacts on every build, so a pinned hash can go stale. The CLI then fails with a clear message instead of installing something unverified. Immutable per-release artifacts are the real fix.
 
 ## Builds and release assets

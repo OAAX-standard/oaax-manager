@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Regenerate src/oaax_manager/index.json from the bucket: every runtime and toolchain of one OAAX version.
+"""Regenerate src/oaax_manager/index.json from the bucket: every runtime, toolchain and conversion wheel of one OAAX version.
 
 The public bucket does not allow listing, so this needs `s3cmd` configured with read access (maintainers only);
 the listing can also be given as files. Hashes of unchanged objects (same size and ETag) are reused.
@@ -35,6 +35,9 @@ RUNTIME_KEY = re.compile(
     r"(?:/(?P<ubuntu>\d+\.\d+))?/(?P<file>library[^/]*\.tar\.gz)$"
 )
 TOOLCHAIN_KEY = re.compile(r"^conversion-toolchain/(?P<version>[^/]+)/[A-Z_]+/oaax-(?P<name>[a-z0-9-]+)-toolchain\.tar$")
+WHEEL_KEY = re.compile(  # the wheel's own version must be the folder's: pip needs the file name untouched
+    r"^conversion-toolchain/(?P<version>[^/]+)/[A-Z_]+/oaax_(?P<name>[a-z0-9_]+)_conversion-(?P=version)-py3-none-any\.whl$"
+)
 VENDOR_ALIASES = {"nvidia-onnxruntime": "nvidia-ort", "nvidia-tensorrt": "nvidia-trt"}
 
 
@@ -48,7 +51,7 @@ def runtime_variant(m: re.Match) -> str | None:
 
 
 def classify(key: str, size: int) -> dict | None:
-    """Turn a bucket key into an index entry (without hash), or None if it is not a runtime/toolchain archive."""
+    """Turn a bucket key into an index entry (without hash), or None if it is not a runtime/toolchain/wheel."""
     if m := RUNTIME_KEY.match(key):
         return dict(kind="runtime", vendor=m["dir"].lower().replace("_", "-"), version=m["version"],
                     os=m["os"].replace("Ubuntu", "linux").replace("Windows", "windows"), arch=m["arch"],
@@ -56,6 +59,10 @@ def classify(key: str, size: int) -> dict | None:
     if m := TOOLCHAIN_KEY.match(key):
         vendor = VENDOR_ALIASES.get(m["name"], m["name"])
         return dict(kind="toolchain", vendor=vendor, version=m["version"], os="any", arch="any", variant=None,
+                    key=key, size=size)
+    if m := WHEEL_KEY.match(key):
+        vendor = VENDOR_ALIASES.get(m["name"].replace("_", "-"), m["name"].replace("_", "-"))
+        return dict(kind="wheel", vendor=vendor, version=m["version"], os="any", arch="any", variant=None,
                     key=key, size=size)
     return None
 
@@ -88,7 +95,7 @@ def catalog_from_listing(text: str) -> list[dict]:
                 continue
         (items if item else skipped).append(item or key)
     for key in skipped:
-        print(f"skipped (not a runtime/toolchain archive): {key}", file=sys.stderr)
+        print(f"skipped (not a runtime/toolchain/wheel): {key}", file=sys.stderr)
     ids = [(i["kind"], i["vendor"], i["version"], i["os"], i["arch"], i["variant"]) for i in items]
     if len(ids) != len(set(ids)):
         raise SystemExit("two bucket keys map to the same (kind, vendor, version, os, arch, variant): fix classify()")

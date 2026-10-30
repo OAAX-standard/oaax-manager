@@ -23,9 +23,21 @@ def find(catalog, **fields):
     return hits[0]
 
 
-def test_every_archive_is_classified_and_the_wheel_is_skipped(catalog, capsys):
-    assert len(catalog) == 43
-    assert not any(i["key"].endswith(".whl") for i in catalog)
+def test_every_archive_and_the_conversion_wheel_are_classified(catalog, capsys):
+    assert len(catalog) == 44
+    assert [i["kind"] for i in catalog].count("wheel") == 1
+    assert capsys.readouterr().err == ""
+
+
+def test_the_wheel_pairs_with_its_toolchain(catalog):
+    wheel = find(catalog, kind="wheel")
+    assert (wheel["vendor"], wheel["version"], wheel["os"], wheel["arch"]) == ("nvidia-trt", "2.0.0", "any", "any")
+    assert wheel["key"].endswith("/oaax_nvidia_tensorrt_conversion-2.0.0-py3-none-any.whl")
+
+
+def test_a_wheel_whose_version_differs_from_its_folder_is_skipped():
+    key = "conversion-toolchain/2.0.0/NVIDIA/oaax_nvidia_tensorrt_conversion-1.0.0-py3-none-any.whl"
+    assert gen_index.classify(key, 1) is None
 
 
 def test_identities_are_unique(catalog):

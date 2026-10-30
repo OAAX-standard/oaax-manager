@@ -1,9 +1,7 @@
 # oaax-manager
 
-Command-line tool to list and fetch OAAX **2.0** runtimes and conversion toolchains from the OAAX artifact store.
+Command-line tool to list and fetch OAAX **2.0** runtimes, conversion toolchains and conversion wheels from the OAAX artifact store.
 Pure Python (standard library only), works on Linux, Windows and macOS.
-
-> **Status: 0.1.0, the first release.**
 
 ## Install
 
@@ -14,10 +12,10 @@ Needs [uv](https://docs.astral.sh/uv/) (it also provides Python 3.9+ if you have
 | `oaax-manager` on your PATH, isolated | `uv tool install oaax-manager` |
 | to run it once, installing nothing | `uvx oaax-manager list` |
 | a single file, any Python 3.9+, no uv | `python oaax-manager.pyz list` (from the [Release](https://github.com/OAAX-standard/oaax-manager/releases)) |
-| the wheel from the GitHub Release | `uv tool install ./oaax_manager-0.1.0-py3-none-any.whl` |
-| to install from a clone or a tag | `uv tool install .` or `uv tool install git+https://github.com/OAAX-standard/oaax-manager@v0.1.0` |
+| the wheel from the GitHub Release | `uv tool install ./oaax_manager-<version>-py3-none-any.whl` |
+| to install from a clone or a tag | `uv tool install .` or `uv tool install git+https://github.com/OAAX-standard/oaax-manager@v<version>` |
 
-- **Pin a version** for anything you script: `uv tool install oaax-manager==0.1.0` (or the tag `@v0.1.0`; without it a git install gives you the latest `main`). The artifact index is part of the release, so the same version always fetches the same bytes.
+- **Pin a version** for anything you script: `uv tool install oaax-manager==<version>` (or the tag `@v<version>`; without it a git install gives you the latest `main`). The artifact index is part of the release, so the same version always fetches the same bytes.
 - **Upgrade** with `uv tool upgrade oaax-manager` and read the [CHANGELOG](https://github.com/OAAX-standard/oaax-manager/blob/main/CHANGELOG.md).
 - **Verify a release asset**: `sha256sum -c SHA256SUMS` (the sums are also in the release notes).
 
@@ -25,9 +23,10 @@ Needs [uv](https://docs.astral.sh/uv/) (it also provides Python 3.9+ if you have
 
 | Command | What it does |
 | ------- | ------------ |
-| `oaax-manager list [--kind K] [--vendor V]` | everything available; `*` marks runtimes built for this OS/CPU (several variants may match) |
+| `oaax-manager list [--kind K] [--vendor V]` | everything available; `*` marks runtimes that fit this OS/CPU (several variants may match: choose with `--variant`) |
 | `oaax-manager fetch runtime <vendor>` | picks this machine's OS/arch, extracts to `./runtime-<vendor>-<version>-<os>-<arch>[-<variant>]/` (the hidden `.oaax-manager.json` inside records what was extracted) |
 | `oaax-manager fetch toolchain <vendor>` | saves `<name>-<version>.tar`; then `docker load -i <file>` |
+| `oaax-manager fetch wheel <vendor>` | saves the Python conversion wheel under its published name (no Docker; e.g. `nvidia-trt`); then `uv tool install <file>` |
 
 ```bash
 oaax-manager list --kind toolchain --vendor intel
@@ -35,6 +34,7 @@ oaax-manager fetch runtime nvidia-ort --variant cuda12      # several builds exi
 oaax-manager fetch runtime cpu --os linux --arch aarch64 -o ./runtimes
 oaax-manager fetch runtime cpu --artifact-version 2.0.0     # default: the newest version available for your platform
 oaax-manager fetch toolchain intel -o ./toolchains
+oaax-manager fetch wheel nvidia-trt -o ./wheels             # Docker-free TensorRT conversion
 ```
 
 An existing runtime directory is never overwritten: delete it to fetch again.
