@@ -1084,14 +1084,24 @@ def test_every_yaml_file_under_dot_github_parses():
         yaml.safe_load(path.read_text())
 
 
-def test_the_readme_has_no_relative_links():
-    """PyPI renders README.md as the project page, where a relative link (CHANGELOG.md) is broken: links are absolute URLs or in-page anchors."""
+@pytest.mark.parametrize("name", ["README.md", "README.pypi.md"])
+def test_the_readmes_have_no_relative_links(name):
+    """PyPI renders README.pypi.md as the project page (and the GitHub README may be copied there): a relative link (CHANGELOG.md) is broken, so links are absolute URLs or in-page anchors."""
     import pathlib
     import re
 
-    text = (pathlib.Path(__file__).resolve().parent.parent / "README.md").read_text()
+    text = (pathlib.Path(__file__).resolve().parent.parent / name).read_text()
     relative = [t for t in re.findall(r"\]\(([^)\s]+)\)", text) if not t.startswith(("http://", "https://", "#", "mailto:"))]
     assert relative == []
+
+
+def test_the_pypi_page_is_the_pypi_readme():
+    import pathlib
+
+    root = pathlib.Path(__file__).resolve().parent.parent
+    assert 'readme = "README.pypi.md"' in (root / "pyproject.toml").read_text()
+    for block in (root / "README.pypi.md").read_text().split("```")[1::2]:
+        assert "](" not in block  # a markdown link inside a code block shows raw on PyPI
 
 
 def test_a_read_only_output_directory_does_not_blame_a_link(tmp_path):
