@@ -4,6 +4,8 @@ All notable changes to oaax-manager. Versions follow [semver](https://semver.org
 
 ## [0.2.0] - 2026-10-30
 
+- `oaax-manager scan [--vendor V] [--json]`: which accelerators this machine has (CPU, Intel, NVIDIA incl. Jetson and DGX Spark, Hailo, DeepX; Linux and Windows) and whether an OAAX runtime can use them: driver, OS, glibc, libraries and versions are checked against the requirements of the OAAX docs, the first fix is named, and the `fetch` command is printed. Read-only: no root, nothing installed or loaded, tools run from an empty temporary directory.
+- `fetch runtime <vendor> --variant auto` fetches the build `scan` recommends (default behaviour is unchanged: `fetch` still never guesses between variants).
 - `fetch wheel <vendor>` and `list --kind wheel`: the Python conversion wheel of the NVIDIA TensorRT toolchain (`nvidia-trt`) is indexed and downloaded with a pinned sha256, under its published name (pip and uv refuse a renamed wheel), then `uv tool install <file>`. The index has 44 artifacts (+1 wheel); the other 43 are identical. Needs this version: an older oaax-manager rejects an index with a `wheel` entry.
 - `list` footer: `*` is said to mean "fits this OS and CPU", with the hint to choose with `--variant` when several are marked, instead of "runtime for this machine" (several CUDA, HailoRT or Ubuntu builds are starred together).
 - README: no release version in the status line or the install examples (`<version>` placeholders); a test keeps it that way.

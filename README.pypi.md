@@ -31,6 +31,8 @@ oaax-manager fetch toolchain intel -o ./toolchains          # saves a .tar: then
 | `list [--kind K] [--vendor V]` | every runtime, toolchain and conversion wheel of the OAAX 2.0 artifact store |
 | `fetch runtime <vendor>` | picks this machine's OS and CPU, downloads, verifies and extracts |
 | `fetch toolchain <vendor>` | downloads the Docker image as a `.tar` (it never touches Docker itself) |
+| `scan [--vendor V] [--json]` | which accelerators (CPU, Intel, NVIDIA, Hailo, DeepX) this machine has, whether a runtime can use them, what to fix, and the `fetch` command to run; read-only |
+| `fetch runtime <vendor> --variant auto` | fetches the build `scan` recommends for this machine |
 | `fetch wheel <vendor>` | downloads the Python conversion wheel (e.g. `nvidia-trt`, for machines without Docker GPU access); then `uv tool install <file>` |
 
 ## Why you can trust a fetch

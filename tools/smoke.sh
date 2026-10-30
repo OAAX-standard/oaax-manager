@@ -12,6 +12,9 @@ printf '%s\n' "$list" | grep -Eq '^toolchain ' || fail "'list' shows no toolchai
 printf '%s\n' "$list" | grep -Eq '^wheel ' || fail "'list' shows no wheel: $list"
 printf '%s\n' "$list" | head -3
 
+scan=$("$@" scan --json 2>&1) || fail "'scan --json' exited non-zero: $scan"
+printf '%s' "$scan" | grep -q '"name": "CPU"' || fail "'scan --json' shows no CPU: $scan"
+
 err=$("$@" fetch runtime nosuch 2>&1 >/dev/null)
 rc=$?
 [ "$rc" -eq 1 ] || fail "'fetch runtime nosuch' should exit 1, got $rc: $err"

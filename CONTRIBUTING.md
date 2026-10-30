@@ -32,6 +32,15 @@ The artifact bucket does not allow public listing, so the package ships `src/oaa
 - Three kinds are indexed: `runtime`, `toolchain` (Docker tar) and `wheel` (`oaax_<name>_conversion-<version>-py3-none-any.whl`, the Python conversion toolchain). A wheel whose version differs from its folder's is skipped, not guessed. A new kind needs a `KINDS` entry in `index.py`, a pattern in `gen_index.py` and a hint in `fetch_file`.
 - **Stale pins:** today the vendor CI re-uploads `2.0.0` artifacts on every build, so a pinned hash can go stale. The CLI then fails with a clear message instead of installing something unverified. Immutable per-release artifacts are the real fix.
 
+## How `scan` works
+
+`src/oaax_manager/system.py` is the only code that touches the machine (files, `ldconfig`, vendor tools); `scan.py` holds the logic. Tests replace `System` with a fake (`tests/test_scan.py`), so a rule is tested with data, not hardware.
+
+- **Rules come from the docs**: the "Requirements" section of each chip's page in the [OAAX docs](https://github.com/OAAX-standard/OAAX/tree/main/docs). Change the docs and the rule together; quote the sentence in the test. The AI Manager plugin's detection (`accl_manager`) is the reference for *how* to probe, not for what is supported.
+- **Variants come from the index**: a new build there is considered without code, but its name must match what the scan understands (a test checks every indexed variant).
+- **A check is `ok`, `warn` (usable, with a caveat), `fail` or `skip`**. Unknown never passes: an unreadable driver version is a failure, not a guess.
+- **Test it on real machines before a release**: build `tools/build_pyz.py`, copy the `.pyz` to a Jetson, a Hailo host, a DeepX host, a Windows host, ... and compare `scan` with what `nvidia-smi`, `hailortcli -v` or `dxrt-cli -i` say. The first round of this found the CUDA 11 soname (`libcudart.so.11.0`), a log file written by `hailortcli`, and GPUs that WSL exposes without PCI.
+
 ## Builds and release assets
 
 CI (`.github/workflows/build.yml`) builds a reproducible wheel and `oaax-manager.pyz` on every push to `main` and every pull request:
