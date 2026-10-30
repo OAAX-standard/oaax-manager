@@ -55,7 +55,8 @@ def cmd_list(args: argparse.Namespace, index: list[Artifact]) -> int:
     widths = [max(len(r[i]) for r in table) for i in range(len(header))]
     for row in table:
         print("  ".join(cell.ljust(w) for cell, w in zip(row, widths)).rstrip())
-    print(f"\n* = runtime for this machine ({host_os}-{host_arch}); toolchains are Docker images and run anywhere with Docker.")
+    print(f"\n* = runtime that fits this OS and CPU ({host_os}-{host_arch}); choose with --variant when several are marked."
+          "\nToolchains are Docker images and wheels are Python packages: both run on any OS.")
     return 0
 
 
@@ -105,25 +106,27 @@ def resolve(args: argparse.Namespace, index: list[Artifact]) -> Artifact:
 
 
 def cmd_fetch(args: argparse.Namespace, index: list[Artifact]) -> int:
-    if args.kind == "toolchain" and (args.os or args.arch):
-        raise UserError("--os/--arch only apply to runtimes (toolchains are Docker images)")
+    if args.kind != "runtime" and (args.os or args.arch):
+        raise UserError("--os/--arch only apply to runtimes (toolchains and wheels run on any OS)")
     if args.kind == "runtime" and args.force:
-        raise UserError("--force only applies to toolchains; delete the runtime directory to fetch it again")
+        raise UserError("--force only applies to toolchains and wheels; delete the runtime directory to fetch it again")
     artifact = resolve(args, index)
     out = Path(args.output)
-    if artifact.kind == "toolchain":
-        return fetch_toolchain(artifact, out, args.force)
+    if artifact.kind != "runtime":
+        return fetch_file(artifact, out, args.force)
     return fetch_runtime(artifact, out)
 
 
-def toolchain_filename(a: Artifact) -> str:
-    """The version is part of the name, so fetching 2.1.0 into the same -o never replaces the verified 2.0.0 (nor shares its .part)."""
+def local_filename(a: Artifact) -> str:
+    """The version is part of the name, so fetching 2.1.0 into the same -o never replaces the verified 2.0.0 (nor shares its .part).
+    A wheel keeps its name as published: pip and uv refuse a renamed one."""
     path = Path(a.filename)
-    return a.filename if a.version in a.filename else f"{path.stem}-{a.version}{path.suffix}"
+    return a.filename if a.kind == "wheel" or a.version in a.filename else f"{path.stem}-{a.version}{path.suffix}"
 
 
-def fetch_toolchain(a: Artifact, out: Path, force: bool) -> int:
-    dest = out / toolchain_filename(a)
+def fetch_file(a: Artifact, out: Path, force: bool) -> int:
+    """Toolchains and wheels: one verified file, nothing extracted."""
+    dest = out / local_filename(a)
     if dest.parent.resolve() != out.resolve():  # the name's own directory, not where dest points: the tar may be a link to another disk
         raise FetchError(f"refusing to write outside {out}")
     if dest.is_dir():
@@ -140,6 +143,9 @@ def fetch_toolchain(a: Artifact, out: Path, force: bool) -> int:
             check_disk_space(out, a.size - part_bytes(dest))
             download(a.url, dest, a.size, a.sha256)
             print(f"Verified sha256 and saved {dest}")
+    if a.kind == "wheel":
+        print(f"Install it with:  uv tool install {quote(dest)}")
+        return 0
     print(f"Load it into Docker with:  docker load -i {quote(dest)}\n(the image name and tag come from the tar; check `docker image ls`)")
     return 0
 
@@ -194,25 +200,25 @@ def print_libraries(dest: Path, files: list[str]) -> None:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="oaax-manager", description="List and fetch OAAX runtimes and toolchains.")
+    parser = argparse.ArgumentParser(prog="oaax-manager", description="List and fetch OAAX runtimes, toolchains and conversion wheels.")
     parser.add_argument("--version", action="version", version=f"oaax-manager {__version__}")
     parser.add_argument("--index", type=Path, help="use this index.json instead of the packaged one (mirrors, tests)")
     sub = parser.add_subparsers(dest="command", required=True)
 
     p_list = sub.add_parser("list", help="show the available artifacts")
-    p_list.add_argument("--kind", choices=("runtime", "toolchain"))
+    p_list.add_argument("--kind", choices=("runtime", "toolchain", "wheel"))
     p_list.add_argument("--vendor")
     p_list.set_defaults(func=cmd_list)
 
     p_fetch = sub.add_parser("fetch", help="download and verify one artifact")
-    p_fetch.add_argument("kind", choices=("runtime", "toolchain"))
+    p_fetch.add_argument("kind", choices=("runtime", "toolchain", "wheel"))
     p_fetch.add_argument("vendor", help="see `oaax-manager list` (e.g. cpu, intel, nvidia-ort, nvidia-trt, hailo, deepx)")
     p_fetch.add_argument("--artifact-version", dest="version", help="default: the newest version available for your platform")
     p_fetch.add_argument("--variant", help="needed when several builds exist (e.g. cuda12)")
     p_fetch.add_argument("--os", choices=("linux", "windows", "macos"), help="runtimes only; default: this machine")
     p_fetch.add_argument("--arch", choices=("x86_64", "aarch64"), help="runtimes only; default: this machine")
     p_fetch.add_argument("-o", "--output", default=".", help="directory to write into (default: current directory)")
-    p_fetch.add_argument("--force", action="store_true", help="toolchains: download again even if already present and verified")
+    p_fetch.add_argument("--force", action="store_true", help="toolchains and wheels: download again even if already present and verified")
     p_fetch.set_defaults(func=cmd_fetch)
     return parser
 

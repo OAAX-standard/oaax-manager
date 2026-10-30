@@ -44,6 +44,15 @@ def test_list_marks_host_runtimes(bucket, monkeypatch, capsys):
     assert not [l for l in out.splitlines() if l.startswith("toolchain") and l.rstrip().endswith("*")]
 
 
+def test_list_footer_says_a_star_only_means_the_build_fits(bucket, monkeypatch, capsys):
+    """#13/#15: several variants can be starred; the footer must not say "the runtime for this machine"."""
+    host(monkeypatch)
+    run(bucket[1], "list")
+    out = capsys.readouterr().out
+    assert "fits this OS and CPU (linux-x86_64); choose with --variant when several are marked" in out
+    assert "for this machine" not in out
+
+
 def test_list_filter_without_match_is_an_error(bucket, capsys):
     assert run(bucket[1], "list", "--vendor", "nope") == 1
     assert "no artifact matches" in capsys.readouterr().err
@@ -145,6 +154,43 @@ def test_server_down_is_a_clean_error(bucket, monkeypatch, tmp_path, capsys):
     assert "download failed" in capsys.readouterr().err
 
 
+@pytest.fixture
+def with_wheel(bucket):
+    root, _ = bucket
+    (root / "tc/oaax_cpu_conversion-2.0.0-py3-none-any.whl").write_bytes(b"PK-wheel")
+    entries = json.loads(bucket[1].read_text())
+    entries["artifacts"].append(entry(root, "tc/oaax_cpu_conversion-2.0.0-py3-none-any.whl", kind="wheel", os="any", arch="any"))
+    bucket[1].write_text(json.dumps(entries))
+    return bucket[1]
+
+
+def test_fetch_wheel_keeps_its_published_name_and_hints_uv(with_wheel, tmp_path, capsys):
+    """#14: pip and uv refuse a renamed wheel, so no `-<version>` is added; a second run only re-verifies."""
+    out = tmp_path / "out"
+    assert run(with_wheel, "fetch", "wheel", "cpu", "-o", str(out)) == 0
+    assert (out / "oaax_cpu_conversion-2.0.0-py3-none-any.whl").read_bytes() == b"PK-wheel"
+    assert "uv tool install" in capsys.readouterr().out
+    assert run(with_wheel, "fetch", "wheel", "cpu", "-o", str(out)) == 0
+    assert "already downloaded" in capsys.readouterr().out
+
+
+def test_wheel_is_listed_and_filterable(with_wheel, capsys):
+    assert run(with_wheel, "list", "--kind", "wheel") == 0
+    lines = capsys.readouterr().out.splitlines()
+    assert lines[1].startswith("wheel") and "runtime" not in lines[1]
+    assert not lines[1].rstrip().endswith("*")
+
+
+def test_wheel_rejects_runtime_only_flags(with_wheel, capsys):
+    assert run(with_wheel, "fetch", "wheel", "cpu", "--os", "linux") == 1
+    assert "only apply to runtimes" in capsys.readouterr().err
+
+
+def test_vendor_without_a_wheel_points_to_what_it_has(bucket, capsys):
+    assert run(bucket[1], "fetch", "wheel", "cpu") == 1
+    assert "has a runtime and a toolchain" in capsys.readouterr().err
+
+
 def test_packaged_index_is_wellformed():
     index = load_index()
     assert index
@@ -153,7 +199,7 @@ def test_packaged_index_is_wellformed():
     for a in index:
         assert len(a.sha256) == 64 and int(a.sha256, 16) >= 0
         assert a.size > 0 and a.url.startswith("https://")
-        assert a.kind in ("runtime", "toolchain") and a.os in ("linux", "windows", "macos", "any")
+        assert a.kind in ("runtime", "toolchain", "wheel") and a.os in ("linux", "windows", "macos", "any")
 
 
 def test_http_index_is_refused(bucket, tmp_path, capsys):
@@ -331,7 +377,7 @@ GOOD = dict(kind="runtime", vendor="cpu", version="2.0.0", os="linux", arch="x86
     ("size", 0), ("size", -1), ("size", "12"), ("size", 1.5), ("size", True),
     ("sha256", "A" * 64), ("sha256", "abc"), ("sha256", None),
     ("vendor", "x/../../../../PWNED"), ("vendor", "a\\b"), ("vendor", "Cpu"), ("vendor", ""),
-    ("variant", "CON/x"), ("variant", ".."), ("version", "../2"), ("arch", "x/y"), ("os", "solaris"), ("kind", "wheel"),
+    ("variant", "CON/x"), ("variant", ".."), ("version", "../2"), ("arch", "x/y"), ("os", "solaris"), ("kind", "firmware"),
     ("key", "/abs/library.tar.gz"), ("key", "a/../b.tar"), ("key", "rt/"), ("key", ""), ("key", "rt\\x.tar"),
     ("key", "http://evil/x.tar"), ("key", "rt/con.tar"), ("key", "rt/NUL.tar.gz"),
 ])

@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import http.server
+import re
+from pathlib import Path
 import json
 import os
 import sys
@@ -325,7 +327,7 @@ def test_every_entry_the_generator_makes_from_the_real_listing_loads(tmp_path):
     path = tmp_path / "i.json"
     path.write_text(json.dumps({"schema": 1, "base_url": "https://example.com", "artifacts": entries}))
     from oaax_manager.index import load_index
-    assert len(load_index(path)) == 43
+    assert len(load_index(path)) == 44
 
 
 # F18
@@ -1160,3 +1162,11 @@ def test_piped_output_keeps_the_header_before_the_progress_lines(bucket, tmp_pat
 
 def test_a_hash_mismatch_also_names_a_proxy_or_captive_portal():
     assert "captive portal" in download.STALE_PIN and "upgrade oaax-manager" in download.STALE_PIN
+
+
+def test_readme_names_no_release_version():
+    """#12: a literal version in the install examples goes stale with every release."""
+    root = Path(__file__).resolve().parent.parent
+    for name in ("README.md", "README.pypi.md"):
+        text = (root / name).read_text()
+        assert not re.search(r"==\d|oaax_manager-\d|@v\d|Status: \d", text), name

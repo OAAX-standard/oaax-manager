@@ -2,6 +2,12 @@
 
 All notable changes to oaax-manager. Versions follow [semver](https://semver.org/); the artifact index (`index.json`) is part of each release.
 
+## [0.2.0] - 2026-10-30
+
+- `fetch wheel <vendor>` and `list --kind wheel`: the Python conversion wheel of the NVIDIA TensorRT toolchain (`nvidia-trt`) is indexed and downloaded with a pinned sha256, under its published name (pip and uv refuse a renamed wheel), then `uv tool install <file>`. The index has 44 artifacts (+1 wheel); the other 43 are identical. Needs this version: an older oaax-manager rejects an index with a `wheel` entry.
+- `list` footer: `*` is said to mean "fits this OS and CPU", with the hint to choose with `--variant` when several are marked, instead of "runtime for this machine" (several CUDA, HailoRT or Ubuntu builds are starred together).
+- README: no release version in the status line or the install examples (`<version>` placeholders); a test keeps it that way.
+
 ## [0.1.2] - 2026-10-30
 
 - The PyPI project page has its own, shorter readme (`README.pypi.md`): what OAAX is, install, the commands, what a fetch guarantees, links. The GitHub README is unchanged. No code or index change: the artifact index is identical to 0.1.1.

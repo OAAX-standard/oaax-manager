@@ -28,9 +28,10 @@ oaax-manager fetch toolchain intel -o ./toolchains          # saves a .tar: then
 
 | Command | What it does |
 | ------- | ------------ |
-| `list [--kind K] [--vendor V]` | every runtime and toolchain of the OAAX 2.0 artifact store |
+| `list [--kind K] [--vendor V]` | every runtime, toolchain and conversion wheel of the OAAX 2.0 artifact store |
 | `fetch runtime <vendor>` | picks this machine's OS and CPU, downloads, verifies and extracts |
 | `fetch toolchain <vendor>` | downloads the Docker image as a `.tar` (it never touches Docker itself) |
+| `fetch wheel <vendor>` | downloads the Python conversion wheel (e.g. `nvidia-trt`, for machines without Docker GPU access); then `uv tool install <file>` |
 
 ## Why you can trust a fetch
 

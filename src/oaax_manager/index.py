@@ -19,7 +19,7 @@ SHA256 = re.compile(r"^[0-9a-f]{64}$")
 VERSION = re.compile(r"^\d+(\.\d+)*$")  # releases only: orderable, no pre-release spellings
 KEY_PART = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._+-]*$")
 WINDOWS_RESERVED = {"con", "prn", "aux", "nul", *(f"com{i}" for i in range(1, 10)), *(f"lpt{i}" for i in range(1, 10))}
-KINDS = ("runtime", "toolchain")
+KINDS = ("runtime", "toolchain", "wheel")
 OSES = ("linux", "windows", "macos", "any")
 
 
@@ -29,7 +29,7 @@ class IndexError_(Exception):
 
 @dataclass(frozen=True)
 class Artifact:
-    kind: str  # "runtime" | "toolchain"
+    kind: str  # "runtime" | "toolchain" (Docker image) | "wheel" (Python conversion toolchain)
     vendor: str
     version: str
     os: str  # linux | windows | macos | any
