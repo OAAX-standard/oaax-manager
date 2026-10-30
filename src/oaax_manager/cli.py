@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import json
 import shlex
 import subprocess
 import sys
@@ -12,6 +13,8 @@ from pathlib import Path
 from . import __version__
 from .download import FetchError, check_disk_space, download, fetch_lock, part_bytes, safe_extract, sha256_file, verify_extracted
 from .index import Artifact, IndexError_, host_platform, load_index, version_key
+from .scan import ScanError, render, scan, to_dict
+from .system import System
 
 
 class UserError(Exception):
@@ -86,12 +89,13 @@ def resolve(args: argparse.Namespace, index: list[Artifact]) -> Artifact:
         candidates = [a for a in candidates if a.version == args.version]
         if not candidates:
             raise UserError(f"no {args.kind} {args.vendor} version {args.version}{where}. Versions available{where}: {', '.join(versions)}")
-    if args.variant:  # before the newest-version pick: the newest version may not have the build you asked for
-        wanted = [a for a in candidates if a.variant == args.variant]
+    variant = auto_variant(args, index) if args.variant == "auto" else args.variant
+    if variant:  # before the newest-version pick: the newest version may not have the build you asked for
+        wanted = [a for a in candidates if a.variant == variant]
         if not wanted:
             have = sorted({a.variant for a in candidates if a.variant})
             raise UserError(
-                f"no {args.vendor} {args.kind} with variant {args.variant!r}{where}. "
+                f"no {args.vendor} {args.kind} with variant {variant!r}{where}. "
                 + (f"Variants available{where}: {', '.join(have)}." if have else "It has no variants: leave --variant out.")
                 + (" Pass --os/--arch to look at another platform." if args.kind == "runtime" else "")
             )
@@ -101,8 +105,42 @@ def resolve(args: argparse.Namespace, index: list[Artifact]) -> Artifact:
         candidates = [a for a in candidates if version_key(a.version) == newest]
     if len(candidates) > 1:
         options = ", ".join(sorted(a.variant or "-" for a in candidates))
-        raise UserError(f"several builds match; choose one with --variant ({options})")
+        raise UserError(f"several builds match; choose one with --variant ({options}), or `--variant auto` to use what `oaax-manager scan` finds on this machine")
     return candidates[0]
+
+
+def auto_variant(args: argparse.Namespace, index: list[Artifact]) -> str | None:
+    """`--variant auto`: the build `scan` recommends for this machine, or an error saying why there is none."""
+    if args.kind != "runtime":
+        raise UserError("--variant auto only applies to runtimes")
+    if args.os or args.arch:
+        raise UserError("--variant auto looks at this machine: do not combine it with --os/--arch")
+    report = scan(System(), index)
+    runtime = report.runtime(args.vendor)
+    if runtime is None:
+        raise UserError(f"--variant auto does not know how to check {args.vendor!r}: choose a variant yourself")
+    if not runtime.usable:
+        raise UserError(f"--variant auto: {args.vendor} cannot be used on this machine ({report.why_not(args.vendor)}). "
+                        f"Details: oaax-manager scan --vendor {args.vendor}. "
+                        "If its libraries are installed where the loader does not look, choose --variant yourself.")
+    chosen = runtime.usable[0]
+    if chosen:
+        print(f"--variant auto: using {chosen} ({len(runtime.usable)} usable here, the best first; see `oaax-manager scan`)")
+    return chosen
+
+
+def cmd_scan(args: argparse.Namespace, index: list[Artifact]) -> int:
+    """Exit 0 when the scan ran; with --vendor, 1 when that runtime cannot be used here (for scripts)."""
+    vendors = sorted({a.vendor for a in index if a.kind == "runtime"})
+    if args.vendor and args.vendor not in vendors:
+        raise UserError(f"no runtime for vendor {args.vendor!r}. Available: {', '.join(vendors)}")
+    report = scan(System(), index)
+    if args.json:
+        print(json.dumps(to_dict(report), indent=2))
+    else:
+        print(render(report, args.vendor))
+    runtime = report.runtime(args.vendor) if args.vendor else None
+    return 1 if args.vendor and not (runtime and runtime.usable) else 0
 
 
 def cmd_fetch(args: argparse.Namespace, index: list[Artifact]) -> int:
@@ -210,11 +248,16 @@ def build_parser() -> argparse.ArgumentParser:
     p_list.add_argument("--vendor")
     p_list.set_defaults(func=cmd_list)
 
+    p_scan = sub.add_parser("scan", help="check which accelerators this machine has and whether a runtime can use them")
+    p_scan.add_argument("--vendor", help="only this runtime (see `list`); exit code 1 if it cannot be used here")
+    p_scan.add_argument("--json", action="store_true", help="machine-readable output")
+    p_scan.set_defaults(func=cmd_scan)
+
     p_fetch = sub.add_parser("fetch", help="download and verify one artifact")
     p_fetch.add_argument("kind", choices=("runtime", "toolchain", "wheel"))
     p_fetch.add_argument("vendor", help="see `oaax-manager list` (e.g. cpu, intel, nvidia-ort, nvidia-trt, hailo, deepx)")
     p_fetch.add_argument("--artifact-version", dest="version", help="default: the newest version available for your platform")
-    p_fetch.add_argument("--variant", help="needed when several builds exist (e.g. cuda12)")
+    p_fetch.add_argument("--variant", help="needed when several builds exist (e.g. cuda12); `auto` takes the one `scan` recommends for this machine")
     p_fetch.add_argument("--os", choices=("linux", "windows", "macos"), help="runtimes only; default: this machine")
     p_fetch.add_argument("--arch", choices=("x86_64", "aarch64"), help="runtimes only; default: this machine")
     p_fetch.add_argument("-o", "--output", default=".", help="directory to write into (default: current directory)")
@@ -231,7 +274,7 @@ def main(argv: list[str] | None = None) -> int:
     sys.stdout.reconfigure(line_buffering=True)  # piped (`| tee log`), stdout is block-buffered and printed after the progress lines of stderr
     try:
         return args.func(args, load_index(args.index))
-    except (UserError, FetchError, IndexError_) as exc:
+    except (UserError, FetchError, IndexError_, ScanError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
     except OSError as exc:  # unwritable or conflicting output path, disk errors

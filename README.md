@@ -24,6 +24,7 @@ Needs [uv](https://docs.astral.sh/uv/) (it also provides Python 3.9+ if you have
 | Command | What it does |
 | ------- | ------------ |
 | `oaax-manager list [--kind K] [--vendor V]` | everything available; `*` marks runtimes that fit this OS/CPU (several variants may match: choose with `--variant`) |
+| `oaax-manager scan [--vendor V] [--json]` | which accelerators this machine has and whether a runtime can use them: [details below](#scan-this-machine) |
 | `oaax-manager fetch runtime <vendor>` | picks this machine's OS/arch, extracts to `./runtime-<vendor>-<version>-<os>-<arch>[-<variant>]/` (the hidden `.oaax-manager.json` inside records what was extracted) |
 | `oaax-manager fetch toolchain <vendor>` | saves `<name>-<version>.tar`; then `docker load -i <file>` |
 | `oaax-manager fetch wheel <vendor>` | saves the Python conversion wheel under its published name (no Docker; e.g. `nvidia-trt`); then `uv tool install <file>` |
@@ -39,6 +40,25 @@ oaax-manager fetch wheel nvidia-trt -o ./wheels             # Docker-free Tensor
 
 An existing runtime directory is never overwritten: delete it to fetch again.
 Running the same command again **re-checks** its files against the sha256 and permissions recorded at extraction, and fails, naming the file, if one is missing or changed (files you added are not checked).
+
+## Scan this machine
+
+`oaax-manager scan` answers "which chips do I have, and can an OAAX runtime use them?" for the CPU, Intel, NVIDIA (ONNX Runtime and TensorRT, including Jetson and DGX Spark), Hailo and DeepX, on Linux and Windows. For each chip it lists what it found and what it checked (driver, OS, glibc, libraries, versions), the first thing to fix if something fails, and the `fetch` command to run:
+
+```text
+Hailo   READY       4x Hailo-8 (PCIe)
+    [ok] driver: hailo_pci 4.20.0
+    [ok] HailoRT: 4.20.0
+    -> oaax-manager fetch runtime hailo --variant hailort4.20.0
+NVIDIA  NOT USABLE  NVIDIA GPU (PCI 10de:24b0)
+    [!!] driver: driver/library version mismatch: the kernel module is 580.178.04, the user library 595.99. Reboot; ...
+```
+
+- **`--variant auto`**: `oaax-manager fetch runtime nvidia-ort --variant auto` fetches the build the scan recommends and says which. Without it, `fetch` never guesses between variants. `auto` refuses, with the reason, when the runtime cannot be used here, and cannot be combined with `--os`/`--arch`.
+- **Scripts**: `scan --json`; `scan --vendor V` exits 1 when `V` cannot be used here.
+- **Read-only**: it reads `/sys`, `/proc`, `/etc/os-release`, `ldconfig -p`, and runs `nvidia-smi`, `hailortcli`, `dxrt-cli` and `modinfo` with a timeout, from an empty temporary directory. It needs no root, installs nothing and never loads a vendor library.
+- **Rules** are the "Requirements" of each chip's page on [docs.oaax.org](https://docs.oaax.org). It tests what the docs list; a library installed where the loader does not look (`LD_LIBRARY_PATH` counts, other paths do not) shows as missing: choose `--variant` yourself then.
+- **Not covered**: chips without an OAAX 2.0 runtime in the index (SiMa, MediaTek, ...), macOS, and a real model run (use [`oaax-conformance`](https://pypi.org/project/oaax-conformance/)).
 
 ## What it guarantees
 
